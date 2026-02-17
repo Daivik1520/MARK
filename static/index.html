@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="MARK — Advanced AI System Controller for macOS">
+    <title>M.A.R.K. — AI System Controller</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%23FF6A00'/><text x='50%' y='55%' text-anchor='middle' dominant-baseline='central' font-size='16' font-weight='900' fill='%23000'>M</text></svg>">
+</head>
+<body>
+    <!-- Animated Background -->
+    <div class="bg-canvas"></div>
+    <div class="bg-grid"></div>
+
+    <!-- Toast Container -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <div class="app-container">
+        <!-- ── Header ── -->
+        <header class="header">
+            <div class="header-brand">
+                <div class="brand-icon">M</div>
+                <div>
+                    <div class="brand-name">M.A.R.K.</div>
+                    <div class="brand-subtitle">AI System Controller</div>
+                </div>
+            </div>
+            <div class="header-status">
+                <div class="tts-toggle">
+                    <label for="wakeWordToggle">🎤 Wake</label>
+                    <input type="checkbox" id="wakeWordToggle" class="toggle-switch">
+                    <span class="wake-status-label" id="wakeWordStatus"></span>
+                </div>
+                <div class="tts-toggle">
+                    <label for="ttsToggle">Voice</label>
+                    <input type="checkbox" id="ttsToggle" class="toggle-switch" checked>
+                </div>
+                <div class="status-indicator">
+                    <div class="status-dot" id="statusDot"></div>
+                    <span id="statusText">Connecting...</span>
+                </div>
+                <button class="btn-reset" id="btnReset" title="Reset conversation">Reset</button>
+            </div>
+        </header>
+
+        <!-- ── Main Content ── -->
+        <div class="main-content">
+            <!-- Orb Visualization Panel -->
+            <div class="orb-panel">
+                <div class="orb-container">
+                    <canvas id="orbCanvas" width="260" height="260"></canvas>
+                    <div class="orb-rings"></div>
+                    <div class="orb-rings ring-2"></div>
+                </div>
+                <div class="orb-label">
+                    <h2 id="orbStatus">Idle</h2>
+                    <p id="orbSubtext">Awaiting your command</p>
+                </div>
+            </div>
+
+            <!-- Chat Panel -->
+            <div class="chat-panel">
+                <div class="chat-header">
+                    <h3>Command Terminal</h3>
+                    <span class="response-time" id="responseTime"></span>
+                </div>
+
+                <!-- Messages -->
+                <div class="messages-area" id="messagesArea">
+                    <div class="welcome-state" id="welcomeState">
+                        <h2>Hello, Sir</h2>
+                        <p>I'm MARK, your AI system controller. I can open apps, browse the web, manage files, send messages, control your system, and much more.</p>
+                        <div class="quick-actions">
+                            <button class="quick-action" data-cmd="Open Safari">🌐 Open Safari</button>
+                            <button class="quick-action" data-cmd="Take a screenshot">📸 Screenshot</button>
+                            <button class="quick-action" data-cmd="List open windows">🪟 List Windows</button>
+                            <button class="quick-action" data-cmd="Open the Documents folder">📁 Documents</button>
+                            <button class="quick-action" data-cmd="What can you do?">🤖 Capabilities</button>
+                            <button class="quick-action" data-cmd="Play some music on YouTube">🎵 Play Music</button>
+                        </div>
+                    </div>
+
+                    <!-- Thinking indicator -->
+                    <div class="thinking-indicator" id="thinkingIndicator">
+                        <div class="thinking-dot"></div>
+                        <div class="thinking-dot"></div>
+                        <div class="thinking-dot"></div>
+                    </div>
+                </div>
+
+                <!-- Input Area -->
+                <div class="input-area">
+                    <div class="input-wrapper">
+                        <input type="text" id="messageInput" placeholder="Type a command or speak..." autocomplete="off" spellcheck="false">
+                        <div class="voice-indicator" id="voiceIndicator">
+                            <div class="voice-bars">
+                                <div class="voice-bar"></div>
+                                <div class="voice-bar"></div>
+                                <div class="voice-bar"></div>
+                                <div class="voice-bar"></div>
+                                <div class="voice-bar"></div>
+                            </div>
+                            <span>Listening...</span>
+                        </div>
+                        <div class="input-actions">
+                            <button class="btn-icon btn-mic" id="btnMic" title="Voice input (hold to talk)">
+                                🎙️
+                            </button>
+                            <button class="btn-icon btn-send" id="btnSend" title="Send message">
+                                ↑
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.min.js"></script>
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
