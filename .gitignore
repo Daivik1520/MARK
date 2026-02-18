@@ -6,3 +6,7 @@ __pycache__/
 .vscode/
 venv/
 env/
+screenshots/
+memory.json
+routines.json
+reminders.json

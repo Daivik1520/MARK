@@ -38,7 +38,13 @@ const DOM = {
     ttsToggle: document.getElementById('ttsToggle'),
     toastContainer: document.getElementById('toastContainer'),
     wakeWordToggle: document.getElementById('wakeWordToggle'),
-    wakeWordStatus: document.getElementById('wakeWordStatus')
+    wakeWordStatus: document.getElementById('wakeWordStatus'),
+    clapToggle: document.getElementById('clapToggle'),
+    btnUserAccount: document.getElementById('btnUserAccount'),
+    settingsOverlay: document.getElementById('settingsOverlay'),
+    btnCloseSettings: document.getElementById('btnCloseSettings'),
+    systemPromptEditor: document.getElementById('systemPromptEditor'),
+    btnSavePrompt: document.getElementById('btnSavePrompt')
 };
 
 // ─────────────────────────────────────────────
@@ -57,6 +63,10 @@ let state = {
     commandMode: false,         // Actively capturing a command after wake word
     commandTimeout: null,       // Timeout to end command capture
     wakeWordCooldown: false,    // Prevent double-trigger
+    clapEnabled: false,         // Clap detection enabled
+    clapStream: null,           // Mic stream for clap detection
+    clapAnalyser: null,         // AnalyserNode for clap detection
+    clapCooldown: false,        // Prevent rapid re-triggering
 };
 
 // ─────────────────────────────────────────────
@@ -503,6 +513,110 @@ function startWakeWordListener() {
 }
 
 // ─────────────────────────────────────────────
+// CLAP DETECTION SYSTEM — Double-Clap to Activate
+// ─────────────────────────────────────────────
+
+let clapCtx = null;       // Dedicated AudioContext for clap detection
+let clapTimeDomain = null; // Uint8Array for time-domain data
+let lastClapTime = 0;      // Timestamp of last detected clap
+let clapCheckInterval = null;
+
+function startClapDetection() {
+    if (state.clapEnabled) return;
+    navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } })
+        .then(stream => {
+            state.clapStream = stream;
+            state.clapEnabled = true;
+
+            if (!clapCtx) clapCtx = new (window.AudioContext || window.webkitAudioContext)();
+            const source = clapCtx.createMediaStreamSource(stream);
+            state.clapAnalyser = clapCtx.createAnalyser();
+            state.clapAnalyser.fftSize = 2048;
+            state.clapAnalyser.smoothingTimeConstant = 0.3;
+            source.connect(state.clapAnalyser);
+            clapTimeDomain = new Uint8Array(state.clapAnalyser.fftSize);
+
+            // Check for claps at 60fps
+            clapCheckInterval = setInterval(detectClap, 16);
+
+            showToast('👏 Clap detection ON — double-clap to activate MARK', 'success');
+            console.log('Clap detection started');
+        })
+        .catch(err => {
+            console.error('Clap detection mic error:', err);
+            showToast('Microphone access needed for clap detection', 'error');
+            if (DOM.clapToggle) DOM.clapToggle.checked = false;
+        });
+}
+
+function stopClapDetection() {
+    state.clapEnabled = false;
+    if (clapCheckInterval) { clearInterval(clapCheckInterval); clapCheckInterval = null; }
+    if (state.clapStream) {
+        state.clapStream.getTracks().forEach(t => t.stop());
+        state.clapStream = null;
+    }
+    state.clapAnalyser = null;
+    clapTimeDomain = null;
+    lastClapTime = 0;
+    showToast('Clap detection OFF', 'info');
+    console.log('Clap detection stopped');
+}
+
+function detectClap() {
+    if (!state.clapEnabled || !state.clapAnalyser || !clapTimeDomain) return;
+    // Don't detect during speaking (prevents TTS audio triggering a clap)
+    if (state.orbMode === 'speaking' || state.currentAudio) return;
+    // Don't detect if already activated / cooldown
+    if (state.clapCooldown) return;
+
+    state.clapAnalyser.getByteTimeDomainData(clapTimeDomain);
+
+    // Find peak amplitude — clap shows as a sharp spike
+    let peak = 0;
+    for (let i = 0; i < clapTimeDomain.length; i++) {
+        const v = Math.abs(clapTimeDomain[i] - 128);
+        if (v > peak) peak = v;
+    }
+
+    // Threshold: a strong clap typically peaks above 60-80 out of 128
+    const CLAP_THRESHOLD = 55;
+
+    if (peak > CLAP_THRESHOLD) {
+        const now = Date.now();
+        const gap = now - lastClapTime;
+
+        if (gap > 150 && gap < 700) {
+            // ✅ DOUBLE CLAP DETECTED!
+            lastClapTime = 0;
+            triggerClapActivation();
+        } else {
+            // First clap — wait for second
+            lastClapTime = now;
+        }
+    }
+}
+
+function triggerClapActivation() {
+    if (state.clapCooldown) return;
+    state.clapCooldown = true;
+
+    console.log('👏👏 Double clap detected — activating MARK!');
+
+    // Visual feedback: orb goes wakeword mode
+    setOrbMode('wakeword');
+    playWakeChime();
+
+    // Tell server to generate activation TTS
+    socket.emit('clap_activate');
+
+    // Cooldown: 4 seconds before next clap can trigger
+    setTimeout(() => {
+        state.clapCooldown = false;
+    }, 4000);
+}
+
+// ─────────────────────────────────────────────
 // MANUAL MIC (push to talk, still works)
 // ─────────────────────────────────────────────
 
@@ -647,70 +761,33 @@ function playTTSAudio(base64Audio) {
 }
 
 // ─────────────────────────────────────────────
-// ORB VISUALIZATION — Premium Animated Orb
+// ORB VISUALIZATION — Premium 3D Orb
 // ─────────────────────────────────────────────
 
-const orbCtx = DOM.orbCanvas.getContext('2d');
-// 2x resolution for retina
-DOM.orbCanvas.width = 520;
-DOM.orbCanvas.height = 520;
-DOM.orbCanvas.style.width = '260px';
-DOM.orbCanvas.style.height = '260px';
+// Initialize 3D Orb
+let centerOrb = null;
 
-let orbAnimFrame;
-let orbPhase = 0;
-let wakeFlash = 0;
+// Wait for DOM
+document.addEventListener('DOMContentLoaded', () => {
+    if (typeof OrbVisualizer !== 'undefined') {
+        centerOrb = new OrbVisualizer(DOM.orbCanvas);
+    }
+});
 
-// Smooth interpolation state
-let orbCur = { intensity: 0.1, speed: 0.015, coreAlpha: 0.15, pSpeed: 1 };
-let orbTgt = { intensity: 0.1, speed: 0.015, coreAlpha: 0.15, pSpeed: 1 };
-
-// Web Audio API analyzer (connected during TTS playback)
+// Audio bridge
 let audioAnalyzer = null;
 let audioFreqData = null;
 
-// Particle system — 40 tiny orbiting light points
-const PARTICLES = [];
-for (let i = 0; i < 40; i++) {
-    PARTICLES.push({
-        a: (i / 40) * Math.PI * 2,
-        r: 0.85 + Math.random() * 0.55,
-        s: (0.002 + Math.random() * 0.004) * (Math.random() > 0.5 ? 1 : -1),
-        size: 0.8 + Math.random() * 1.4,
-        op: 0.15 + Math.random() * 0.35,
-        ph: Math.random() * Math.PI * 2,
-        w: 0.02 + Math.random() * 0.04
-    });
-}
-
-function _lerp(a, b, t) { return a + (b - a) * t; }
-
-function _audioLevel() {
-    if (!audioAnalyzer || !audioFreqData) return 0;
-    try {
-        audioAnalyzer.getByteFrequencyData(audioFreqData);
-        let s = 0;
-        for (let i = 0; i < audioFreqData.length; i++) s += audioFreqData[i];
-        return s / (audioFreqData.length * 255);
-    } catch (e) { return 0; }
-}
-
-function _audioBands() {
-    if (!audioAnalyzer || !audioFreqData) return [0, 0, 0, 0];
-    try {
-        audioAnalyzer.getByteFrequencyData(audioFreqData);
-        const n = audioFreqData.length, q = Math.floor(n / 4), b = [0, 0, 0, 0];
-        for (let i = 0; i < 4; i++) {
-            let s = 0;
-            for (let j = i * q; j < (i + 1) * q; j++) s += audioFreqData[j];
-            b[i] = s / (q * 255);
-        }
-        return b;
-    } catch (e) { return [0, 0, 0, 0]; }
+function _getAudioData() {
+    if (!audioAnalyzer || !audioFreqData) return [];
+    audioAnalyzer.getByteFrequencyData(audioFreqData);
+    return audioFreqData;
 }
 
 function setOrbMode(mode) {
     state.orbMode = mode;
+
+    // Update text labels
     const labels = {
         dormant: ['D O R M A N T', 'Say "MARK" to activate'],
         idle: ['I D L E', 'Awaiting your command'],
@@ -720,209 +797,27 @@ function setOrbMode(mode) {
         speaking: ['S P E A K I N G', 'Delivering response']
     };
     const [s, sub] = labels[mode] || labels.idle;
-    DOM.orbStatus.textContent = s;
-    DOM.orbSubtext.textContent = sub;
+    if (DOM.orbStatus) DOM.orbStatus.textContent = s;
+    if (DOM.orbSubtext) DOM.orbSubtext.textContent = sub;
 
-    switch (mode) {
-        case 'dormant': orbTgt = { intensity: 0.05, speed: 0.008, coreAlpha: 0.08, pSpeed: 0.3 }; break;
-        case 'wakeword': orbTgt = { intensity: 0.6, speed: 0.1, coreAlpha: 0.7, pSpeed: 4 }; wakeFlash = 1; break;
-        case 'listening': orbTgt = { intensity: 0.35, speed: 0.05, coreAlpha: 0.4, pSpeed: 2.5 }; break;
-        case 'thinking': orbTgt = { intensity: 0.3, speed: 0.07, coreAlpha: 0.35, pSpeed: 3 }; break;
-        case 'speaking': orbTgt = { intensity: 0.45, speed: 0.04, coreAlpha: 0.5, pSpeed: 2 }; break;
-        default: orbTgt = { intensity: 0.15, speed: 0.02, coreAlpha: 0.2, pSpeed: 1 };
+    // Update 3D Orb
+    if (centerOrb) {
+        centerOrb.setMode(mode);
     }
 }
 
-function drawOrb() {
-    const w = DOM.orbCanvas.width, h = DOM.orbCanvas.height;
-    const cx = w / 2, cy = h / 2;
-    const LR = 0.04;
-
-    // Smooth lerp towards target
-    orbCur.intensity = _lerp(orbCur.intensity, orbTgt.intensity, LR);
-    orbCur.speed = _lerp(orbCur.speed, orbTgt.speed, LR);
-    orbCur.coreAlpha = _lerp(orbCur.coreAlpha, orbTgt.coreAlpha, LR);
-    orbCur.pSpeed = _lerp(orbCur.pSpeed, orbTgt.pSpeed, LR);
-
-    let intensity = orbCur.intensity;
-    let coreAlpha = orbCur.coreAlpha;
-
-    // Audio reactivity
-    let aLvl = 0, aBands = [0, 0, 0, 0];
-    if (state.orbMode === 'speaking') {
-        aLvl = _audioLevel();
-        aBands = _audioBands();
-        intensity += aLvl * 0.6;
-        coreAlpha += aLvl * 0.4;
+// Main loop to feed audio data to orb
+function orbLoop() {
+    requestAnimationFrame(orbLoop);
+    if (centerOrb && state.orbMode === 'speaking' && audioAnalyzer) {
+        centerOrb.updateAudio(_getAudioData());
+    } else if (centerOrb) {
+        // Clear audio data when not speaking
+        centerOrb.updateAudio([]);
     }
-
-    orbPhase += orbCur.speed;
-    orbCtx.clearRect(0, 0, w, h);
-    const R = 150;
-
-    // Wake flash decay
-    if (wakeFlash > 0) {
-        intensity += wakeFlash * 0.5;
-        coreAlpha += wakeFlash * 0.4;
-        wakeFlash *= 0.92;
-        if (wakeFlash < 0.01) wakeFlash = 0;
-    }
-
-    // ── Outer glow ──
-    const g1 = orbCtx.createRadialGradient(cx, cy, R * 0.3, cx, cy, R * (1.8 + intensity * 0.5));
-    g1.addColorStop(0, `rgba(255,106,0,${0.08 + intensity * 0.12})`);
-    g1.addColorStop(0.5, `rgba(255,80,0,${0.03 + intensity * 0.05})`);
-    g1.addColorStop(1, 'rgba(0,0,0,0)');
-    orbCtx.fillStyle = g1;
-    orbCtx.fillRect(0, 0, w, h);
-
-    // ── Wake pulse rings ──
-    if (wakeFlash > 0.05) {
-        for (let r = 0; r < 3; r++) {
-            const pr = R * (1.1 + (1 - wakeFlash) * 2 + r * 0.15);
-            orbCtx.strokeStyle = `rgba(255,200,50,${Math.max(0, wakeFlash - r * 0.1) * 0.4})`;
-            orbCtx.lineWidth = 2.5 - r * 0.5;
-            orbCtx.beginPath();
-            orbCtx.arc(cx, cy, pr, 0, Math.PI * 2);
-            orbCtx.stroke();
-        }
-    }
-
-    // ── Orbiting particles ──
-    for (const p of PARTICLES) {
-        p.a += p.s * orbCur.pSpeed;
-        const wobble = Math.sin(orbPhase * 3 + p.ph) * p.w;
-        const pr = R * (p.r + wobble);
-        let szMul = 1, aBst = 0;
-        if (state.orbMode === 'speaking' && aLvl > 0) {
-            const b = aBands[Math.floor(Math.abs(p.a) * 2) % 4];
-            szMul = 1 + b * 3;
-            aBst = b * 0.4;
-        }
-        const px = cx + Math.cos(p.a) * pr;
-        const py = cy + Math.sin(p.a) * pr;
-        const sz = p.size * szMul * (0.8 + intensity);
-        const al = Math.min(1, p.op + intensity * 0.2 + aBst);
-
-        const pg = orbCtx.createRadialGradient(px, py, 0, px, py, sz * 3);
-        pg.addColorStop(0, `rgba(255,160,40,${al})`);
-        pg.addColorStop(0.5, `rgba(255,106,0,${al * 0.3})`);
-        pg.addColorStop(1, 'rgba(255,80,0,0)');
-        orbCtx.fillStyle = pg;
-        orbCtx.beginPath();
-        orbCtx.arc(px, py, sz * 3, 0, Math.PI * 2);
-        orbCtx.fill();
-
-        orbCtx.fillStyle = `rgba(255,220,150,${al * 0.8})`;
-        orbCtx.beginPath();
-        orbCtx.arc(px, py, sz * 0.6, 0, Math.PI * 2);
-        orbCtx.fill();
-    }
-
-    // ── Main morphing orb (7 layers, 5-harmonic noise) ──
-    for (let i = 7; i >= 0; i--) {
-        const t = i / 7;
-        const ma = intensity * (1 - t * 0.4);
-        const lr = R * (0.3 + t * 0.7);
-
-        orbCtx.beginPath();
-        for (let j = 0; j <= 180; j++) {
-            const ang = (j / 180) * Math.PI * 2;
-            let d = 0;
-            d += Math.sin(ang * 2 + orbPhase * 1.1) * ma * lr * 0.12;
-            d += Math.cos(ang * 3 + orbPhase * 0.8) * ma * lr * 0.08;
-            d += Math.sin(ang * 5 + orbPhase * 1.5) * ma * lr * 0.06;
-            d += Math.cos(ang * 7 + orbPhase * 0.6) * ma * lr * 0.04;
-            d += Math.sin(ang * 11 + orbPhase * 2.0) * ma * lr * 0.02;
-            if (state.orbMode === 'speaking' && aLvl > 0) {
-                d += aBands[Math.floor((j / 180) * 4) % 4] * lr * 0.25;
-            }
-            const x = cx + Math.cos(ang) * (lr + d);
-            const y = cy + Math.sin(ang) * (lr + d);
-            j === 0 ? orbCtx.moveTo(x, y) : orbCtx.lineTo(x, y);
-        }
-        orbCtx.closePath();
-
-        const ox = Math.sin(orbPhase * 0.5) * lr * 0.15;
-        const oy = Math.cos(orbPhase * 0.7) * lr * 0.15;
-        const gr = orbCtx.createRadialGradient(cx + ox, cy + oy, 0, cx, cy, lr * 1.3);
-        const bo = 0.08 + t * 0.18 + intensity * 0.1;
-        const hue = 25 + t * 12 + Math.sin(orbPhase * 0.3) * 5;
-        gr.addColorStop(0, `hsla(${hue + 10},100%,${60 + t * 10}%,${bo})`);
-        gr.addColorStop(0.4, `hsla(${hue},100%,${50 + t * 10}%,${bo * 0.7})`);
-        gr.addColorStop(0.8, `hsla(${hue - 5},100%,${40 + t * 10}%,${bo * 0.3})`);
-        gr.addColorStop(1, 'hsla(15,100%,20%,0)');
-        orbCtx.fillStyle = gr;
-        orbCtx.fill();
-    }
-
-    // ── Inner core ──
-    const cp = 0.9 + 0.1 * Math.sin(orbPhase * 3);
-    const cr = R * 0.35 * cp;
-    const cg = orbCtx.createRadialGradient(cx, cy, 0, cx, cy, cr);
-    cg.addColorStop(0, `rgba(255,230,180,${coreAlpha * 0.9})`);
-    cg.addColorStop(0.3, `rgba(255,180,80,${coreAlpha * 0.5})`);
-    cg.addColorStop(0.7, `rgba(255,120,30,${coreAlpha * 0.2})`);
-    cg.addColorStop(1, 'rgba(255,80,0,0)');
-    orbCtx.fillStyle = cg;
-    orbCtx.beginPath();
-    orbCtx.arc(cx, cy, cr, 0, Math.PI * 2);
-    orbCtx.fill();
-
-    // ── Specular highlight ──
-    const sg = orbCtx.createRadialGradient(cx - R * 0.25, cy - R * 0.3, 0, cx - R * 0.1, cy - R * 0.15, R * 0.5);
-    sg.addColorStop(0, `rgba(255,255,255,${0.03 + intensity * 0.05})`);
-    sg.addColorStop(1, 'rgba(255,255,255,0)');
-    orbCtx.fillStyle = sg;
-    orbCtx.beginPath();
-    orbCtx.arc(cx, cy, R, 0, Math.PI * 2);
-    orbCtx.fill();
-
-    // ── Dormant: breathing rings ──
-    if (state.orbMode === 'dormant') {
-        const b1 = 0.5 + 0.5 * Math.sin(orbPhase * 1.5);
-        orbCtx.strokeStyle = `rgba(255,106,0,${0.04 + b1 * 0.08})`;
-        orbCtx.lineWidth = 1.5;
-        orbCtx.beginPath();
-        orbCtx.arc(cx, cy, R * (1.05 + b1 * 0.2), 0, Math.PI * 2);
-        orbCtx.stroke();
-        const b2 = 0.5 + 0.5 * Math.sin(orbPhase * 0.8 + 1);
-        orbCtx.strokeStyle = `rgba(255,106,0,${0.02 + b2 * 0.04})`;
-        orbCtx.lineWidth = 1;
-        orbCtx.beginPath();
-        orbCtx.arc(cx, cy, R * (1.15 + b2 * 0.25), 0, Math.PI * 2);
-        orbCtx.stroke();
-    }
-
-    // ── Thinking: rotating arcs ──
-    if (state.orbMode === 'thinking') {
-        for (let a = 0; a < 3; a++) {
-            const as = orbPhase * 2 + a * Math.PI * 2 / 3;
-            orbCtx.strokeStyle = `rgba(255,180,50,${0.15 + a * 0.05})`;
-            orbCtx.lineWidth = 2;
-            orbCtx.beginPath();
-            orbCtx.arc(cx, cy, R * (1.08 + a * 0.06), as, as + 0.4 + Math.sin(orbPhase * 3 + a) * 0.2);
-            orbCtx.stroke();
-        }
-    }
-
-    // ── Speaking: audio-reactive pulsing rings ──
-    if (state.orbMode === 'speaking' && aLvl > 0.01) {
-        for (let r = 0; r < 3; r++) {
-            const rr = R * (1.1 + r * 0.12 + aBands[r] * 0.3);
-            orbCtx.strokeStyle = `rgba(255,${150 + r * 30},${50 + r * 20},${0.08 + aBands[r] * 0.25})`;
-            orbCtx.lineWidth = 1.5 + aBands[r] * 3;
-            orbCtx.beginPath();
-            orbCtx.arc(cx, cy, rr, 0, Math.PI * 2);
-            orbCtx.stroke();
-        }
-    }
-
-    orbAnimFrame = requestAnimationFrame(drawOrb);
 }
+orbLoop();
 
-// Start orb animation
-drawOrb();
 
 
 
@@ -980,6 +875,29 @@ if (DOM.wakeWordToggle) {
     });
 }
 
+// Clap detection toggle
+if (DOM.clapToggle) {
+    DOM.clapToggle.addEventListener('change', (e) => {
+        if (e.target.checked) {
+            startClapDetection();
+        } else {
+            stopClapDetection();
+        }
+    });
+}
+
+// Listen for clap activation TTS from server
+socket.on('clap_activation_tts', (data) => {
+    if (data.audio) {
+        playTTSAudio(data.audio);
+    }
+});
+
+// Listen for fired reminders from background scheduler
+socket.on('reminder_fired', (data) => {
+    showToast(`🔔 Reminder: ${data.message}`, 'success');
+});
+
 // Reset conversation
 DOM.btnReset.addEventListener('click', () => {
     socket.emit('reset_chat');
@@ -991,11 +909,95 @@ DOM.btnReset.addEventListener('click', () => {
 });
 
 // Quick actions
-document.querySelectorAll('.quick-action').forEach(btn => {
+document.querySelectorAll('.chip, .quick-action').forEach(btn => {
     btn.addEventListener('click', () => {
         sendMessage(btn.dataset.cmd);
     });
 });
+
+// ─────────────────────────────────────────────
+// SETTINGS PANEL
+// ─────────────────────────────────────────────
+
+function openSettings() {
+    DOM.settingsOverlay.classList.add('active');
+    // Load current system prompt from server
+    socket.emit('get_system_prompt');
+}
+
+function closeSettings() {
+    DOM.settingsOverlay.classList.remove('active');
+}
+
+// Open settings
+if (DOM.btnUserAccount) {
+    DOM.btnUserAccount.addEventListener('click', openSettings);
+}
+
+// Close settings
+if (DOM.btnCloseSettings) {
+    DOM.btnCloseSettings.addEventListener('click', closeSettings);
+}
+
+// Click overlay to close
+if (DOM.settingsOverlay) {
+    DOM.settingsOverlay.addEventListener('click', (e) => {
+        if (e.target === DOM.settingsOverlay) closeSettings();
+    });
+}
+
+// Escape key closes settings
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && DOM.settingsOverlay.classList.contains('active')) {
+        closeSettings();
+    }
+});
+
+// Receive system prompt from server
+socket.on('system_prompt', (data) => {
+    if (DOM.systemPromptEditor) {
+        DOM.systemPromptEditor.value = data.prompt || '';
+    }
+});
+
+// Save system prompt
+if (DOM.btnSavePrompt) {
+    DOM.btnSavePrompt.addEventListener('click', () => {
+        const prompt = DOM.systemPromptEditor.value.trim();
+        if (prompt) {
+            socket.emit('set_system_prompt', { prompt });
+            showToast('💾 System prompt saved', 'success');
+        } else {
+            showToast('Prompt cannot be empty', 'error');
+        }
+    });
+}
+
+// ─────────────────────────────────────────────
+// GESTURE CONTROLLER
+// ─────────────────────────────────────────────
+
+const gestureToggle = document.getElementById('gestureToggle');
+let gestureCtrl = null;
+
+if (gestureToggle && window.GestureController) {
+    gestureCtrl = new GestureController(socket);
+
+    gestureToggle.addEventListener('change', async () => {
+        if (gestureToggle.checked) {
+            const ok = await gestureCtrl.start();
+            if (!ok) {
+                gestureToggle.checked = false;
+                showToast('Camera access denied or unavailable', 'error');
+            } else {
+                showToast('🖐️ Gesture control enabled', 'success');
+            }
+        } else {
+            gestureCtrl.stop();
+            showToast('Gesture control disabled', 'info');
+        }
+    });
+}
 
 // ─────────────────────────────────────────────
 // INIT

@@ -6,12 +6,16 @@ Flask-SocketIO server powering the MARK AI System Controller.
 import os
 import time
 import threading
-from flask import Flask, render_template, send_from_directory
+from flask import Flask, render_template, send_from_directory, request, jsonify
+from werkzeug.utils import secure_filename
 from flask_socketio import SocketIO, emit
 from dotenv import load_dotenv
 
-from ai_engine import get_ai_response, reset_conversation
+from ai_engine import get_ai_response, reset_conversation, get_system_prompt, set_system_prompt
 from tts_engine import text_to_speech_base64
+from reminder_manager import start_scheduler as start_reminder_scheduler
+from clipboard_manager import start_clipboard_monitor
+from gesture_controller import execute_gesture
 
 load_dotenv()
 
@@ -27,6 +31,19 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 @app.route("/")
 def index():
     return send_from_directory("static", "index.html")
+
+
+@app.route("/upload_3d", methods=["POST"])
+def upload_3d():
+    if "file" not in request.files:
+        return jsonify({"error": "No file"}), 400
+    f = request.files["file"]
+    if f.filename == "":
+        return jsonify({"error": "No file selected"}), 400
+    os.makedirs("static/uploads", exist_ok=True)
+    safe = secure_filename(f.filename)
+    f.save(os.path.join("static/uploads", safe))
+    return jsonify({"url": f"/static/uploads/{safe}", "name": safe})
 
 
 # ─────────────────────────────────────────────
@@ -98,6 +115,47 @@ def handle_reset():
     emit("status", {"message": "Conversation reset", "type": "info"})
 
 
+@socketio.on("clap_activate")
+def handle_clap_activate():
+    """Handle clap activation — generate TTS for the activation phrase."""
+    print("👏👏 Clap activation triggered!")
+    activation_text = "Activating all services. M.A.R.K. activated."
+
+    def generate_activation_audio():
+        audio_b64 = text_to_speech_base64(activation_text)
+        if audio_b64:
+            socketio.emit("clap_activation_tts", {"audio": audio_b64})
+
+    threading.Thread(target=generate_activation_audio, daemon=True).start()
+
+
+@socketio.on("get_system_prompt")
+def handle_get_prompt():
+    """Send the current system prompt to the client."""
+    emit("system_prompt", {"prompt": get_system_prompt()})
+
+
+@socketio.on("set_system_prompt")
+def handle_set_prompt(data):
+    """Update the system prompt."""
+    new_prompt = data.get("prompt", "").strip()
+    if new_prompt:
+        set_system_prompt(new_prompt)
+        print("✏️  System prompt updated")
+        emit("status", {"message": "System prompt saved", "type": "success"})
+    else:
+        emit("status", {"message": "Prompt cannot be empty", "type": "error"})
+
+
+@socketio.on("gesture")
+def handle_gesture(data):
+    """Handle gesture events from the frontend."""
+    gesture_type = data.get("type", "")
+    if gesture_type:
+        result = execute_gesture(gesture_type)
+        print(f"🖐️ Gesture: {gesture_type} → {result}")
+
+
 # ─────────────────────────────────────────────
 # STARTUP
 # ─────────────────────────────────────────────
@@ -111,9 +169,13 @@ if __name__ == "__main__":
     print("""
     ╔══════════════════════════════════════╗
     ║         M.A.R.K. SYSTEM              ║
-    ║   AI System Controller v1.0          ║
-    ║   http://localhost:5001              ║
+    ║    AI System Controller v1.0         ║
+    ║     http://localhost:5001            ║
     ╚══════════════════════════════════════╝
     """)
+
+    # Start background services
+    start_reminder_scheduler(socketio)
+    start_clipboard_monitor()
 
     socketio.run(app, host="0.0.0.0", port=5001, debug=False, allow_unsafe_werkzeug=True)

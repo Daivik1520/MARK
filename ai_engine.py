@@ -55,6 +55,70 @@ When calling tools, you MUST use the EXACT parameter names as defined:
 - search_files: query, directory
 - set_volume: level
 - web_search: query
+- save_memory: key, value
+- recall_memory: query
+- list_memories: (no args)
+- delete_memory: key
+- analyze_screen: query
+- run_routine: name
+- list_routines: (no args)
+- create_routine: name, description, steps_json
+- set_reminder: message, time_str
+- list_reminders: (no args)
+- delete_reminder: reminder_id
+- clear_reminders: (no args)
+- track_number: phone
+- get_clipboard_history: count
+- search_clipboard: query
+- paste_from_history: index
+- get_context: (no args)
+- get_news_briefing: topic
+- get_news: topic, count
+- run_code: code, language
+- generate_password: length, options
+
+MEMORY SYSTEM:
+You have persistent long-term memory. When the user says "remember", "save", "store", or tells you personal info, use save_memory.
+When they ask "what's my...", "do you remember...", use recall_memory. You can also list_memories and delete_memory.
+
+VISION SYSTEM:
+You can see the user's screen. When they say "look at my screen", "what do you see", "analyze this error",
+"summarize what I'm looking at", use analyze_screen with a specific query about what to look for.
+
+ROUTINES SYSTEM:
+You can execute multi-step routines. Available: coding mode, good morning, study mode, presentation mode,
+relax mode, gaming mode, night mode, meeting mode. Use run_routine when user says "start X mode".
+You can also list_routines and create_routine for custom ones.
+
+REMINDER SYSTEM:
+You can set reminders that fire as macOS notifications and spoken alerts. Use set_reminder with a message
+and time like "in 10 minutes", "at 3:30 PM", "tomorrow at 9:00". Use list_reminders to show active ones.
+Use delete_reminder or clear_reminders to manage them.
+
+PHONE TRACKER:
+You can look up phone numbers. When the user says "track this number", "who owns this number", "look up this phone",
+use track_number with the phone number. It returns carrier, location, timezone, line type, and validity.
+
+SMART CLIPBOARD:
+You track the user's clipboard in the background. Use get_clipboard_history to show recent copies,
+search_clipboard to find something they copied, and paste_from_history to re-copy an old item.
+When user says "show my clipboard", "what did I copy", "paste that link from earlier", use these tools.
+
+CONTEXTUAL AWARENESS:
+You can see what app, window, tab, and URL the user has open right now. Use get_context when the user says
+"what am I looking at", "summarize this page", "what app am I in", or when you need context for a task.
+
+NEWS BRIEFING:
+You can get news headlines and give briefings. Use get_news_briefing for a full morning briefing (news + weather + reminders).
+Use get_news for just headlines on a topic. When user says "give me a briefing", "what's in the news", "morning update", use these.
+
+CODE RUNNER:
+You can execute code. Use run_code with the code and language (python, javascript, shell).
+When user says "run this code", "execute this", "what does this output", write and run the code.
+
+PASSWORD GENERATOR:
+Generate secure passwords. Use generate_password with length and options ("no-symbols", "pin", "memorable", "copy").
+When user says "generate a password", "I need a password for X", use this tool. Always offer to copy it.
 
 Important rules:
 - Always confirm actions before executing dangerous operations (shutdown, restart).
@@ -64,6 +128,15 @@ Important rules:
 - Keep responses short and punchy.
 - Address the user as \"sir\" naturally.
 """
+
+def get_system_prompt():
+    """Return the current system prompt."""
+    return SYSTEM_PROMPT
+
+def set_system_prompt(new_prompt):
+    """Update the system prompt at runtime."""
+    global SYSTEM_PROMPT
+    SYSTEM_PROMPT = new_prompt
 
 # ─────────────────────────────────────────────
 # TOOL DEFINITIONS (OpenRouter function calling)
@@ -324,6 +397,242 @@ TOOLS = [
                 },
                 "required": ["query"]
             }
+        }
+    },
+    # ── MEMORY TOOLS ──
+    {
+        "type": "function",
+        "function": {
+            "name": "save_memory",
+            "description": "Save a piece of information to long-term memory. Use when the user says 'remember', 'save', 'store', 'note down', or provides personal info to keep.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string", "description": "Short descriptive label for the memory (e.g. 'wifi password', 'favorite color', 'mom birthday')"},
+                    "value": {"type": "string", "description": "The actual information to remember"}
+                },
+                "required": ["key", "value"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "recall_memory",
+            "description": "Search and recall stored memories. Use when the user asks 'what is my...', 'do you remember...', 'what did I tell you about...'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "What to search for in memory (e.g. 'wifi password', 'birthday')"}
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_memories",
+            "description": "List all stored memories. Use when the user asks 'what do you remember' or 'show my memories'.",
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_memory",
+            "description": "Delete a stored memory. Use when the user says 'forget', 'delete', 'remove' a memory.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string", "description": "The memory key to delete"}
+                },
+                "required": ["key"]
+            }
+        }
+    },
+    # ── VISION TOOLS ──
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_screen",
+            "description": "Take a screenshot and analyze what's on the user's screen using AI vision. Use when the user says 'look at my screen', 'what do you see', 'analyze this', 'what's on my screen', 'help me with this error', 'read this', 'summarize what I'm looking at'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Specific question about the screen content (e.g. 'what error is this?', 'summarize this article', 'what app is open?')"}
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    # ── ROUTINE TOOLS ──
+    {
+        "type": "function",
+        "function": {
+            "name": "run_routine",
+            "description": "Execute a predefined multi-step routine. Available routines: coding mode, good morning, study mode, presentation mode, relax mode, gaming mode, night mode, meeting mode. Use when user says 'start X mode', 'activate X', 'begin X'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Name of the routine to run (e.g. 'coding mode', 'good morning')"}
+                },
+                "required": ["name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_routines",
+            "description": "List all available routines. Use when user asks 'what routines do you have' or 'list modes'.",
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_routine",
+            "description": "Create a new custom routine with multiple steps.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Name for the new routine"},
+                    "description": {"type": "string", "description": "What this routine does"},
+                    "steps_json": {"type": "string", "description": "JSON array of steps, each with 'action' and 'args'"}
+                },
+                "required": ["name", "description", "steps_json"]
+            }
+        }
+    },
+    # ── REMINDER TOOLS ──
+    {
+        "type": "function",
+        "function": {
+            "name": "set_reminder",
+            "description": "Set a timed reminder that will fire as a macOS notification and spoken alert. Use when the user says 'remind me', 'set a reminder', 'alert me', 'notify me'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string", "description": "What to remind about (e.g. 'Take a break', 'Call Mom')"},
+                    "time_str": {"type": "string", "description": "When to fire: 'in 10 minutes', 'at 3:30 PM', 'tomorrow at 9:00', 'in 1 hour'"}
+                },
+                "required": ["message", "time_str"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_reminders",
+            "description": "List all active reminders. Use when the user asks 'what reminders do I have' or 'show my reminders'.",
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_reminder",
+            "description": "Delete a specific reminder by matching its message text.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reminder_id": {"type": "string", "description": "Text from the reminder message to match and delete"}
+                },
+                "required": ["reminder_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "clear_reminders",
+            "description": "Clear all active reminders.",
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    # ── PHONE TRACKER ──
+    {
+        "type": "function",
+        "function": {
+            "name": "track_number",
+            "description": "Track a phone number to get carrier, location, timezone, line type and validity. Use when user asks to 'track this number', 'who owns this number', 'look up phone number'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "phone": {"type": "string", "description": "The phone number to track (e.g. +919876543210, 9876543210, +1-555-123-4567)"}
+                },
+                "required": ["phone"]
+            }
+        }
+    },
+    # ── CLIPBOARD ──
+    {
+        "type": "function",
+        "function": {
+            "name": "get_clipboard_history",
+            "description": "Show recent clipboard history. Use when user asks 'show my clipboard', 'what did I copy'.",
+            "parameters": {"type": "object", "properties": {"count": {"type": "string", "description": "Number of items (default 10)"}}, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_clipboard",
+            "description": "Search clipboard history by keyword.",
+            "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "Keyword to search"}}, "required": ["query"]}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "paste_from_history",
+            "description": "Copy a specific item from clipboard history back to clipboard. Use with an index number from get_clipboard_history.",
+            "parameters": {"type": "object", "properties": {"index": {"type": "string", "description": "Item number from history (1 = most recent)"}}, "required": ["index"]}
+        }
+    },
+    # ── CONTEXT ──
+    {
+        "type": "function",
+        "function": {
+            "name": "get_context",
+            "description": "Get current context: active app, window title, browser URL. Use when user says 'what am I looking at', 'summarize this page', or for any context-aware task.",
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    # ── NEWS ──
+    {
+        "type": "function",
+        "function": {
+            "name": "get_news_briefing",
+            "description": "Get a morning briefing with top news, weather, and pending reminders. Use when user says 'give me a briefing', 'morning update', 'what's happening'.",
+            "parameters": {"type": "object", "properties": {"topic": {"type": "string", "description": "Optional topic focus"}}, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_news",
+            "description": "Get news headlines, optionally on a specific topic.",
+            "parameters": {"type": "object", "properties": {"topic": {"type": "string", "description": "Topic or category"}, "count": {"type": "string", "description": "Number of articles (default 5)"}}, "required": []}
+        }
+    },
+    # ── CODE RUNNER ──
+    {
+        "type": "function",
+        "function": {
+            "name": "run_code",
+            "description": "Execute code and return output. Supports python, javascript, shell. Use when user says 'run this code', 'execute this'.",
+            "parameters": {"type": "object", "properties": {"code": {"type": "string", "description": "The code to execute"}, "language": {"type": "string", "description": "python, javascript, or shell"}}, "required": ["code", "language"]}
+        }
+    },
+    # ── PASSWORD GENERATOR ──
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_password",
+            "description": "Generate a strong, secure password. Options: 'no-symbols', 'pin', 'memorable', 'copy' (auto-copy to clipboard).",
+            "parameters": {"type": "object", "properties": {"length": {"type": "string", "description": "Password length (default 16)"}, "options": {"type": "string", "description": "Comma-separated: no-symbols, pin, memorable, copy"}}, "required": []}
         }
     }
 ]

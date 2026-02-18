@@ -14,6 +14,18 @@ from dotenv import load_dotenv
 load_dotenv()
 SERPAPI_KEY = os.getenv("SERPAPI_KEY", "")
 
+# Import feature modules
+from memory_manager import save_memory, recall_memory, list_memories, delete_memory
+from vision_engine import analyze_screen
+from routines import run_routine, list_routines, create_routine
+from reminder_manager import set_reminder, list_reminders, delete_reminder, clear_reminders
+from phone_tracker import track_number
+from clipboard_manager import get_clipboard_history, search_clipboard, paste_from_history, start_clipboard_monitor
+from context_engine import get_context
+from news_briefing import get_news_briefing, get_news
+from code_runner import run_code
+from password_gen import generate_password
+
 
 def _run_applescript(script: str) -> str:
     """Execute an AppleScript and return the output."""
@@ -85,33 +97,50 @@ def open_website(url: str) -> str:
 
 def send_whatsapp(contact: str, message: str) -> str:
     """Open WhatsApp, search for a contact, and send a message."""
+    # Use clipboard approach since WhatsApp text fields reject keystroke
+    safe_contact = contact.replace('\\', '\\\\').replace('"', '\\"')
+    safe_message = message.replace('\\', '\\\\').replace('"', '\\"')
+    
     script = f'''
-    tell application "System Events"
-        key code 49 using command down
-        delay 0.5
-        keystroke "WhatsApp"
-        delay 1.5
-        key code 36
-        delay 2.0
-    end tell
-
-    delay 1.0
-
+    -- Step 1: Open WhatsApp
+    tell application "WhatsApp" to activate
+    delay 2.5
+    
     tell application "System Events"
         tell process "WhatsApp"
             set frontmost to true
             delay 0.5
-            -- Open search
-            keystroke "f" using command down
-            delay 0.5
-            keystroke "{contact}"
+            
+            -- Step 2: Open new chat / search
+            keystroke "n" using command down
             delay 1.5
-            key code 36
-            delay 1.0
-            keystroke "{message}"
-            delay 0.3
-            key code 36
         end tell
+    end tell
+    
+    -- Step 3: Paste the contact name via clipboard
+    set the clipboard to "{safe_contact}"
+    delay 0.3
+    tell application "System Events"
+        keystroke "v" using command down
+        delay 2.0
+        
+        -- Step 4: Select first result
+        key code 125  -- Down arrow
+        delay 0.5
+        key code 36   -- Enter to open chat
+        delay 2.0
+    end tell
+    
+    -- Step 5: Paste the message via clipboard
+    set the clipboard to "{safe_message}"
+    delay 0.3
+    tell application "System Events"
+        keystroke "v" using command down
+        delay 0.5
+        
+        -- Step 6: Send
+        key code 36   -- Enter to send
+        delay 0.5
     end tell
     '''
     result = _run_applescript(script)
@@ -313,12 +342,28 @@ def play_music(query: str, platform: str = "youtube") -> str:
         return f"Could not play on Spotify: {result}"
     else:
         import urllib.parse
+        import re
+
+        # Scrape YouTube search results to find the first video ID
         search_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(query)}"
+        try:
+            headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+            resp = req.get(search_url, headers=headers, timeout=10)
+            # Extract the first video ID from the page
+            match = re.search(r'"videoId":"([a-zA-Z0-9_-]{11})"', resp.text)
+            if match:
+                video_id = match.group(1)
+                video_url = f"https://www.youtube.com/watch?v={video_id}"
+                script = f'open location "{video_url}"'
+                _run_applescript(script)
+                return f"Playing {query} on YouTube, sir."
+        except Exception as e:
+            print(f"  ✗ YouTube scrape error: {e}")
+
+        # Fallback: open search results
         script = f'open location "{search_url}"'
-        result = _run_applescript(script)
-        if "Error" not in result:
-            return f"Searching for {query} on YouTube, sir."
-        return f"Could not open YouTube: {result}"
+        _run_applescript(script)
+        return f"Playing {query} on YouTube, sir."
 
 
 # ─────────────────────────────────────────────
@@ -455,6 +500,37 @@ TOOL_MAP = {
     "unmute_volume": unmute_volume,
     "set_brightness": set_brightness,
     "web_search": web_search,
+    # Memory
+    "save_memory": save_memory,
+    "recall_memory": recall_memory,
+    "list_memories": list_memories,
+    "delete_memory": delete_memory,
+    # Vision
+    "analyze_screen": analyze_screen,
+    # Routines
+    "run_routine": run_routine,
+    "list_routines": list_routines,
+    "create_routine": create_routine,
+    # Reminders
+    "set_reminder": set_reminder,
+    "list_reminders": list_reminders,
+    "delete_reminder": delete_reminder,
+    "clear_reminders": clear_reminders,
+    # Phone
+    "track_number": track_number,
+    # Clipboard
+    "get_clipboard_history": get_clipboard_history,
+    "search_clipboard": search_clipboard,
+    "paste_from_history": paste_from_history,
+    # Context
+    "get_context": get_context,
+    # News
+    "get_news_briefing": get_news_briefing,
+    "get_news": get_news,
+    # Code Runner
+    "run_code": run_code,
+    # Password
+    "generate_password": generate_password,
 }
 
 # Free models often send wrong param names. Map common variants to correct ones.
@@ -473,6 +549,22 @@ ARGUMENT_ALIASES = {
     "take_notes": {"content": "text", "notes": "text", "note": "text", "body": "text", "message": "text"},
     "focus_window": {"name": "app_name", "app": "app_name", "window": "app_name"},
     "set_brightness": {"value": "level", "brightness": "level", "percent": "level"},
+    "save_memory": {"label": "key", "name": "key", "topic": "key", "info": "value", "data": "value", "text": "value", "content": "value", "memory": "value"},
+    "recall_memory": {"search": "query", "key": "query", "topic": "query", "memory": "query", "name": "query"},
+    "delete_memory": {"name": "key", "topic": "key", "memory": "key", "label": "key"},
+    "analyze_screen": {"question": "query", "prompt": "query", "text": "query", "ask": "query"},
+    "run_routine": {"routine": "name", "mode": "name", "routine_name": "name"},
+    "create_routine": {"routine_name": "name", "steps": "steps_json"},
+    "set_reminder": {"text": "message", "reminder": "message", "msg": "message", "content": "message", "time": "time_str", "when": "time_str", "at": "time_str", "in": "time_str"},
+    "delete_reminder": {"id": "reminder_id", "message": "reminder_id", "text": "reminder_id", "name": "reminder_id"},
+    "track_number": {"number": "phone", "phone_number": "phone", "mobile": "phone", "num": "phone", "contact": "phone"},
+    "get_clipboard_history": {"n": "count", "number": "count", "limit": "count"},
+    "search_clipboard": {"search": "query", "keyword": "query", "text": "query", "find": "query"},
+    "paste_from_history": {"i": "index", "number": "index", "num": "index", "item": "index"},
+    "get_news_briefing": {"subject": "topic", "category": "topic", "about": "topic"},
+    "get_news": {"subject": "topic", "category": "topic", "about": "topic", "number": "count", "limit": "count", "n": "count"},
+    "run_code": {"script": "code", "program": "code", "source": "code", "lang": "language", "type": "language"},
+    "generate_password": {"len": "length", "size": "length", "chars": "length", "type": "options", "flags": "options", "mode": "options"},
 }
 
 
