@@ -205,30 +205,30 @@ class GestureController {
         const middleUp = this._isFingerExtended(lm, 12, 10);
         const ringUp = this._isFingerExtended(lm, 16, 14);
         const pinkyUp = this._isFingerExtended(lm, 20, 18);
-        const thumbUp = this._isFingerExtended(lm, 4, 2);
+        const thumbUp = this._isFingerExtended(lm, 4, 3);
 
-        // Finger-to-lips: index tip near nose bridge (lm[1])
-        // Both lm[8] (index tip) x and y close to lm[1] (index base/nose area)
-        const nose = lm[1];  // landmark 1 is near the nose in hand space
-        const tip = lm[8];  // index fingertip
-        const distToNose = Math.hypot(tip.x - nose.x, tip.y - nose.y);
-
-        // A better heuristic: index tip is close to palm center AND hand is near face (center of frame)
         const palmCx = this._palmCenter(lm).x;
-        const handNearCenter = palmCx > 0.35 && palmCx < 0.65;
-        const indexTipHigh = lm[8].y < 0.4; // fingertip near top third of frame
-        const fingerToLips = indexUp && !middleUp && !ringUp && !pinkyUp && handNearCenter && indexTipHigh && lm[8].y < lm[5].y;
 
-        // Two fingers up (Victory ✌️): index + middle up, ring + pinky down
-        const victorySign = indexUp && middleUp && !ringUp && !pinkyUp;
+        // ── Finger to lips (🤫 Shush) ──
+        // Key insight: when your hand is near your face (lips),
+        // the WRIST (lm[0]) is also raised high in the frame —
+        // this is what separates it from simply pointing upward
+        // with the arm down. Thresholds tuned for laptop webcams
+        // where lips appear at ~y=0.45–0.65 in the frame.
+        const handNearCenter = palmCx > 0.25 && palmCx < 0.75;  // wide center
+        const tipNearFace = lm[8].y < 0.62;                   // tip in upper 62%
+        const wristRaised = lm[0].y < 0.82;                   // whole arm raised toward face
+        const fingerToLips = indexUp && !middleUp && !ringUp && !pinkyUp
+            && handNearCenter && tipNearFace && wristRaised;
 
-        // Point (☝️ only index): only index extended, rest folded
-        const pointGesture = indexUp && !middleUp && !ringUp && !pinkyUp && !thumbUp;
+        // ── Point (☝️) ──
+        // Same finger shape but explicitly NOT in the lips-touch zone.
+        // Without !fingerToLips, both conditions would always match together.
+        const pointGesture = indexUp && !middleUp && !ringUp && !pinkyUp && !thumbUp
+            && !fingerToLips;
 
         if (fingerToLips) {
-            this._firePose('lips_touch', '🤫 Muting audio...');
-        } else if (victorySign) {
-            this._firePose('two_fingers_up', '✌️ Brightness +10%');
+            this._firePose('lips_touch', '🤫 Muting...');
         } else if (pointGesture) {
             this._firePose('point', '☝️ Focus window');
         }

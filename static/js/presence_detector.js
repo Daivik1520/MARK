@@ -16,7 +16,7 @@ class PresenceDetector {
         // State tracking
         this.isPresent = true;
         this.lastSeenTime = Date.now();
-        this.absentThresholdMs = 90 * 1000;   // 90s before "away"
+        this.absentThresholdMs = 30 * 1000;   // 30s before "away"
         this.checkIntervalMs = 1500;          // check every 1.5s (low CPU)
         this._intervalId = null;
     }
