@@ -34,6 +34,55 @@ def execute_gesture(gesture_type):
     elif gesture_type == "swipe_down":
         _scroll("up")
         return "scrolled up"
+
+    # ── Spatial / Pose Gestures ──
+    elif gesture_type == "lips_touch":
+        # Mute system audio
+        _applescript("""
+            tell application "System Events"
+                set volume with output muted
+            end tell
+        """)
+        return "muted audio"
+
+    elif gesture_type == "two_fingers_up":
+        # Increase brightness by 10%
+        try:
+            result = subprocess.run(
+                ["osascript", "-e",
+                 'tell application "System Preferences" to quit'],
+                capture_output=True, timeout=2
+            )
+            import re, subprocess as sp
+            cur = sp.run(
+                ["osascript", "-e",
+                 'tell application "System Events" to tell process "SystemUIServer"'
+                 ' to tell bar 1 of the menu bar\n'
+                 '    -- brightness read is unreliable, use brightness key presses\n'
+                 'end tell'],
+                capture_output=True, timeout=2
+            )
+        except Exception:
+            pass
+        # Simulate press brightness-up F2 key twice
+        _applescript("""
+            tell application "System Events"
+                key code 144  -- brightness up
+                key code 144
+                key code 144
+            end tell
+        """)
+        return "brightness increased"
+
+    elif gesture_type == "point":
+        # Bring last active app to front (cycles Mission Control)
+        _applescript("""
+            tell application "System Events"
+                key code 48 using {command down}  -- Cmd+Tab
+            end tell
+        """)
+        return "focus previous app"
+
     return "unknown"
 
 

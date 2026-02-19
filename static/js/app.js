@@ -898,6 +898,21 @@ socket.on('reminder_fired', (data) => {
     showToast(`🔔 Reminder: ${data.message}`, 'success');
 });
 
+// ── Proactive Voice Monitor Alerts ──
+socket.on('proactive_alert', (data) => {
+    const sev = data.severity || 'info';  // info / warning / critical
+    const icons = { info: 'ℹ️', warning: '⚠️', critical: '🚨' };
+    const icon = icons[sev] || 'ℹ️';
+    showToast(`${icon} ${data.message}`, sev === 'critical' ? 'error' : sev === 'warning' ? 'warning' : 'info');
+
+    // Speak the alert via TTS
+    if (DOM.ttsToggle && DOM.ttsToggle.checked) {
+        // Inject the alert into chat as a MARK message too
+        addMessage('ai', data.message, null);
+        scrollToBottom();
+    }
+});
+
 // Reset conversation
 DOM.btnReset.addEventListener('click', () => {
     socket.emit('reset_chat');
@@ -1009,3 +1024,14 @@ console.log('%c M.A.R.K. %c AI System Controller %c Wake Word Ready ',
     'background: #111; color: #FF6A00; font-weight: 600; padding: 4px 8px;',
     'background: #1a1a1a; color: #888; padding: 4px 8px; border-radius: 0 4px 4px 0;'
 );
+
+// ── Presence Detector ── (auto-starts silently)
+// Starts after a 3s delay to let all other resources settle
+if (typeof PresenceDetector !== 'undefined') {
+    setTimeout(() => {
+        window._presenceDetector = new PresenceDetector(socket);
+        window._presenceDetector.start().catch(() => {
+            console.warn('Presence detector not available — no camera or permission denied.');
+        });
+    }, 3000);
+}

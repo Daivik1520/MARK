@@ -5,3 +5,5 @@ edge-tts
 python-dotenv
 pyautogui
 Pillow
+psutil
+playwright

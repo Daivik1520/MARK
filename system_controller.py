@@ -25,6 +25,9 @@ from context_engine import get_context
 from news_briefing import get_news_briefing, get_news
 from code_runner import run_code
 from password_gen import generate_password
+from proactive_monitor import get_system_stats
+from window_manager import tile_windows, focus_app, dim_all_except, move_window, show_all_windows, get_open_windows, maximize_window
+from web_steerer import web_search_deep, web_get_stock, web_book_restaurant, web_navigate
 
 
 def _run_applescript(script: str) -> str:
@@ -531,6 +534,21 @@ TOOL_MAP = {
     "run_code": run_code,
     # Password
     "generate_password": generate_password,
+    # System Health
+    "get_system_stats": get_system_stats,
+    # Window Management
+    "tile_windows": tile_windows,
+    "focus_app": focus_app,
+    "dim_all_except": dim_all_except,
+    "move_window": move_window,
+    "show_all_windows": show_all_windows,
+    "get_open_windows": get_open_windows,
+    "maximize_window": maximize_window,
+    # Web Steerer
+    "web_search_deep": web_search_deep,
+    "web_get_stock": web_get_stock,
+    "web_book_restaurant": web_book_restaurant,
+    "web_navigate": web_navigate,
 }
 
 # Free models often send wrong param names. Map common variants to correct ones.
@@ -565,6 +583,14 @@ ARGUMENT_ALIASES = {
     "get_news": {"subject": "topic", "category": "topic", "about": "topic", "number": "count", "limit": "count", "n": "count"},
     "run_code": {"script": "code", "program": "code", "source": "code", "lang": "language", "type": "language"},
     "generate_password": {"len": "length", "size": "length", "chars": "length", "type": "options", "flags": "options", "mode": "options"},
+    "tile_windows": {"first": "app1", "second": "app2", "direction": "layout", "split": "layout", "mode": "layout"},
+    "focus_app": {"app": "app_name", "application": "app_name", "window": "app_name"},
+    "dim_all_except": {"app": "app_name", "application": "app_name", "keep": "app_name", "focus": "app_name"},
+    "move_window": {"app": "app_name", "application": "app_name", "pos": "position", "where": "position", "location": "position"},
+    "web_search_deep": {"search": "query", "q": "query", "topic": "query", "find": "query"},
+    "web_get_stock": {"symbol": "ticker", "stock": "ticker", "company": "ticker"},
+    "web_book_restaurant": {"food": "query", "type": "query", "cuisine": "query", "city": "location", "area": "location", "where": "location"},
+    "web_navigate": {"link": "url", "site": "url", "page": "url", "address": "url"},
 }
 
 

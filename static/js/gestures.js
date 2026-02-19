@@ -15,14 +15,17 @@ class GestureController {
         this.ctx = null;
         this.overlayEl = null;
         this.indicatorEl = null;
-        this.positions = [];
+        this.positions = [];        // For swipe detection
         this.maxPositions = 20;
         this.minDisplacement = 0.13;
         this.minVelocity = 0.5;
-        this.cooldownMs = 900;
+        this.cooldownMs = 900;      // Swipe cooldown
+        this.poseCooldownMs = 1200; // Pose gesture cooldown
         this.lastGestureTime = 0;
+        this.lastPoseTime = 0;
         this.windowMs = 400;
         this._raf = null;
+        this._lastLandmarks = null; // For pose analysis
     }
 
     async start() {
@@ -111,10 +114,18 @@ class GestureController {
         if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
             const lm = results.multiHandLandmarks[0];
             this._drawHand(lm, w, h);
+            this._lastLandmarks = lm;
+
+            // ── Swipe detection (palm motion) ──
             const palm = this._palmCenter(lm);
             this.positions.push({ x: palm.x, y: palm.y, time: Date.now() });
             if (this.positions.length > this.maxPositions) this.positions.shift();
             this._detect();
+
+            // ── Pose/static gesture detection ──
+            this._detectPose(lm);
+        } else {
+            this._lastLandmarks = null;
         }
     }
 
@@ -148,6 +159,10 @@ class GestureController {
         };
     }
 
+    // ─────────────────────────────────────────
+    // SWIPE DETECTION (motion-based)
+    // ─────────────────────────────────────────
+
     _detect() {
         if (this.positions.length < 6) return;
         const now = Date.now();
@@ -171,6 +186,63 @@ class GestureController {
         } else if (ay > this.minDisplacement && vy > this.minVelocity && ay > ax * 1.4) {
             this._fire(dy > 0 ? 'swipe_down' : 'swipe_up');
         }
+    }
+
+    // ─────────────────────────────────────────
+    // POSE DETECTION (static hand poses)
+    // ─────────────────────────────────────────
+
+    _isFingerExtended(lm, tip, pip) {
+        // Finger is extended if tip Y is above (less than) pip knuckle Y
+        return lm[tip].y < lm[pip].y - 0.02;
+    }
+
+    _detectPose(lm) {
+        const now = Date.now();
+        if (now - this.lastPoseTime < this.poseCooldownMs) return;
+
+        const indexUp = this._isFingerExtended(lm, 8, 6);
+        const middleUp = this._isFingerExtended(lm, 12, 10);
+        const ringUp = this._isFingerExtended(lm, 16, 14);
+        const pinkyUp = this._isFingerExtended(lm, 20, 18);
+        const thumbUp = this._isFingerExtended(lm, 4, 2);
+
+        // Finger-to-lips: index tip near nose bridge (lm[1])
+        // Both lm[8] (index tip) x and y close to lm[1] (index base/nose area)
+        const nose = lm[1];  // landmark 1 is near the nose in hand space
+        const tip = lm[8];  // index fingertip
+        const distToNose = Math.hypot(tip.x - nose.x, tip.y - nose.y);
+
+        // A better heuristic: index tip is close to palm center AND hand is near face (center of frame)
+        const palmCx = this._palmCenter(lm).x;
+        const handNearCenter = palmCx > 0.35 && palmCx < 0.65;
+        const indexTipHigh = lm[8].y < 0.4; // fingertip near top third of frame
+        const fingerToLips = indexUp && !middleUp && !ringUp && !pinkyUp && handNearCenter && indexTipHigh && lm[8].y < lm[5].y;
+
+        // Two fingers up (Victory ✌️): index + middle up, ring + pinky down
+        const victorySign = indexUp && middleUp && !ringUp && !pinkyUp;
+
+        // Point (☝️ only index): only index extended, rest folded
+        const pointGesture = indexUp && !middleUp && !ringUp && !pinkyUp && !thumbUp;
+
+        if (fingerToLips) {
+            this._firePose('lips_touch', '🤫 Muting audio...');
+        } else if (victorySign) {
+            this._firePose('two_fingers_up', '✌️ Brightness +10%');
+        } else if (pointGesture) {
+            this._firePose('point', '☝️ Focus window');
+        }
+    }
+
+    _firePose(gesture, label) {
+        this.lastPoseTime = Date.now();
+        this.socket.emit('gesture', { type: gesture });
+        if (this.indicatorEl) {
+            this.indicatorEl.textContent = label;
+            this.indicatorEl.classList.add('flash');
+            setTimeout(() => this.indicatorEl.classList.remove('flash'), 800);
+        }
+        console.log('✋ Pose: ' + gesture);
     }
 
     _fire(gesture) {

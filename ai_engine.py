@@ -120,6 +120,25 @@ PASSWORD GENERATOR:
 Generate secure passwords. Use generate_password with length and options ("no-symbols", "pin", "memorable", "copy").
 When user says "generate a password", "I need a password for X", use this tool. Always offer to copy it.
 
+SYSTEM HEALTH & PROACTIVE MONITOR:
+Use get_system_stats to show CPU, RAM, disk, battery, and top processes.
+When user says "how is my system", "system health", "what's using CPU", use this tool.
+
+WINDOW MANAGEMENT:
+Use tile_windows(app1, app2, layout) to split two apps side-by-side or stacked.
+Use focus_app(app_name) to bring an app to front.
+Use dim_all_except(app_name) to hide everything and focus on one app.
+Use move_window(app_name, position) with positions: left, right, top, bottom, center, top-left, top-right, bottom-left, bottom-right, fullscreen.
+Use show_all_windows() to restore all hidden apps.
+When user says "tile", "split screen", "focus on", "dim everything", use window management tools.
+
+WEB STEERING (Real Browser):
+Use web_search_deep(query) for real web research — returns titles, snippets and URLs from DuckDuckGo.
+Use web_get_stock(ticker) to fetch live stock price and change from Yahoo Finance.
+Use web_book_restaurant(query, location) to find restaurants with ratings and links.
+Use web_navigate(url) to visit any URL and return the page content.
+When user says "look up", "search the web", "find a restaurant", "what is Tesla's stock", use these tools.
+
 Important rules:
 - Always confirm actions before executing dangerous operations (shutdown, restart).
 - Be concise but informative in responses.
@@ -633,6 +652,131 @@ TOOLS = [
             "name": "generate_password",
             "description": "Generate a strong, secure password. Options: 'no-symbols', 'pin', 'memorable', 'copy' (auto-copy to clipboard).",
             "parameters": {"type": "object", "properties": {"length": {"type": "string", "description": "Password length (default 16)"}, "options": {"type": "string", "description": "Comma-separated: no-symbols, pin, memorable, copy"}}, "required": []}
+        }
+    },
+    # ── SYSTEM HEALTH ──
+    {
+        "type": "function",
+        "function": {
+            "name": "get_system_stats",
+            "description": "Get real-time system health: CPU, RAM, disk, battery, network, and top processes.",
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    # ── WINDOW MANAGEMENT ──
+    {
+        "type": "function",
+        "function": {
+            "name": "tile_windows",
+            "description": "Tile two application windows side-by-side or top-bottom. Use when user says 'tile X and Y', 'split screen'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "app1": {"type": "string", "description": "First app name"},
+                    "app2": {"type": "string", "description": "Second app name"},
+                    "layout": {"type": "string", "description": "'side-by-side' or 'top-bottom' (default side-by-side)"}
+                },
+                "required": ["app1", "app2"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "focus_app",
+            "description": "Bring a specific application to the front and focus it.",
+            "parameters": {
+                "type": "object",
+                "properties": {"app_name": {"type": "string", "description": "App to focus"}},
+                "required": ["app_name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "dim_all_except",
+            "description": "Hide all apps except one — gives the target app full focus. User says 'focus on X and hide everything else', 'dim everything except X'.",
+            "parameters": {
+                "type": "object",
+                "properties": {"app_name": {"type": "string", "description": "App to keep visible"}},
+                "required": ["app_name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "move_window",
+            "description": "Move a window to a named position: left, right, top, bottom, center, top-left, top-right, bottom-left, bottom-right, fullscreen.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "app_name": {"type": "string", "description": "App to move"},
+                    "position": {"type": "string", "description": "Position: left, right, center, fullscreen, top-left, top-right, bottom-left, bottom-right"}
+                },
+                "required": ["app_name", "position"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "show_all_windows",
+            "description": "Restore all hidden application windows. Use after dim_all_except.",
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    # ── WEB STEERER ──
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search_deep",
+            "description": "Perform a real web search using a headless browser. Returns titles, snippets, and URLs. Use for research questions.",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string", "description": "What to search for"}},
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_get_stock",
+            "description": "Look up the current stock price and change for a ticker symbol from Yahoo Finance.",
+            "parameters": {
+                "type": "object",
+                "properties": {"ticker": {"type": "string", "description": "Stock ticker (e.g. TSLA, AAPL, NVDA)"}},
+                "required": ["ticker"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_book_restaurant",
+            "description": "Find restaurants matching a query near a location. Returns top results with ratings, addresses, and links.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "e.g. 'Italian', 'sushi', 'fine dining'"},
+                    "location": {"type": "string", "description": "City or area (default: nearby)"}
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_navigate",
+            "description": "Visit a URL with a real browser and return the page content summary.",
+            "parameters": {
+                "type": "object",
+                "properties": {"url": {"type": "string", "description": "Full URL to visit"}},
+                "required": ["url"]
+            }
         }
     }
 ]

@@ -16,6 +16,8 @@ from tts_engine import text_to_speech_base64
 from reminder_manager import start_scheduler as start_reminder_scheduler
 from clipboard_manager import start_clipboard_monitor
 from gesture_controller import execute_gesture
+from proactive_monitor import start_proactive_monitor
+from system_controller import set_brightness
 
 load_dotenv()
 
@@ -156,6 +158,36 @@ def handle_gesture(data):
         print(f"🖐️ Gesture: {gesture_type} → {result}")
 
 
+@socketio.on("presence")
+def handle_presence(data):
+    """Handle presence detection events from the frontend webcam."""
+    present = data.get("present", True)
+    if not present:
+        # User walked away — dim screen
+        print("👤 Presence: user away — dimming screen")
+        try:
+            set_brightness("20")
+        except Exception:
+            pass
+        emit("proactive_alert", {
+            "message": "Screen dimmed — welcome back when you return, sir.",
+            "severity": "info"
+        })
+    else:
+        # User returned — restore brightness & greet
+        print("👤 Presence: user returned — restoring screen")
+        try:
+            set_brightness("80")
+        except Exception:
+            pass
+        # Send welcome-back TTS
+        def _greet():
+            audio_b64 = text_to_speech_base64("Welcome back, sir.")
+            if audio_b64:
+                socketio.emit("tts_audio", {"audio": audio_b64})
+        threading.Thread(target=_greet, daemon=True).start()
+
+
 # ─────────────────────────────────────────────
 # STARTUP
 # ─────────────────────────────────────────────
@@ -177,5 +209,6 @@ if __name__ == "__main__":
     # Start background services
     start_reminder_scheduler(socketio)
     start_clipboard_monitor()
+    start_proactive_monitor(socketio)
 
     socketio.run(app, host="0.0.0.0", port=5001, debug=False, allow_unsafe_werkzeug=True)

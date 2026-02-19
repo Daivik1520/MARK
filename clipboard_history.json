@@ -68,5 +68,50 @@
     "content": "https://github.com/Daivik1520/MARK",
     "time": "2026-02-18 20:22:49",
     "type": "url"
+  },
+  {
+    "content": "lsof -ti :5001 | xargs kill -9 2>/dev/null; sleep 1; /opt/anaconda3/bin/python3 app.py",
+    "time": "2026-02-18 22:48:58",
+    "type": "text"
+  },
+  {
+    "content": "open YouTube",
+    "time": "2026-02-18 22:51:05",
+    "type": "text"
+  },
+  {
+    "content": "open WhatsApp",
+    "time": "2026-02-18 22:51:30",
+    "type": "text"
+  },
+  {
+    "content": "lsof -ti :5001 | xargs kill -9 2>/dev/null; sleep 1; /opt/anaconda3/bin/python3 app.py",
+    "time": "2026-02-19 16:34:17",
+    "type": "text"
+  },
+  {
+    "content": "Proactive Voice: MARK shouldn't just wait for you. It should speak up when needed. \"Sir, your RAM usage is at 98%, should I close some Chrome tabs for you?\" or \"You have a meeting in 5 minutes, would you like me to open the Zoom link?\"",
+    "time": "2026-02-19 16:35:59",
+    "type": "text"
+  },
+  {
+    "content": "Aura Window Management: Advanced voice-controlled snapping. \"Tile Safari and VS Code side-by-side\" or \"Focus my terminal and dim everything else.\"",
+    "time": "2026-02-19 16:36:11",
+    "type": "text"
+  },
+  {
+    "content": "Web Steering (Actual Browser Navigation)\nBeyond just opening URLs, MARK uses a \"headless\" or automated browser to act on your behalf.\n\nBooking: \"Mark, find me a table for two at a top-rated Italian place for 8 PM tonight.\"\nResearch: \"Look up the stock price of Tesla, find a recent news article explaining its movement, and summarize it for me.\"",
+    "time": "2026-02-19 16:36:25",
+    "type": "text"
+  },
+  {
+    "content": "Presence Detection: MARK dims your screen when you walk away and \"wakes up\" (orb glows) the moment you sit down.",
+    "time": "2026-02-19 16:37:12",
+    "type": "text"
+  },
+  {
+    "content": "Spatial UI (Camera-Based Shortcuts)\nUsing the camera for more than just \"seeing\" your screen.\n\nAir Gestures:\nFinger to lips = Mute all system audio.\nPoint at a window = Bring it to front.\nTwo fingers up = Increase brightness.",
+    "time": "2026-02-19 16:38:27",
+    "type": "text"
   }
 ]
