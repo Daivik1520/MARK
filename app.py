@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 
 from core.ai_engine import get_ai_response, reset_conversation, get_system_prompt, set_system_prompt
 from core.tts_engine import text_to_speech_base64
+from core.fast_router import try_fast_route
 from tools.reminder_manager import start_scheduler as start_reminder_scheduler
 from tools.clipboard_manager import start_clipboard_monitor
 from services.gesture_controller import execute_gesture
@@ -77,8 +78,33 @@ def handle_message(data):
     emit("thinking", {"status": True})
 
     try:
-        # Get AI response (may include tool calls)
         start = time.time()
+
+        # ⚡ FAST PATH: Try local regex matching first (instant, no AI)
+        fast_result = try_fast_route(user_text)
+        if fast_result:
+            elapsed = round(time.time() - start, 4)
+            ai_text = fast_result["text"]
+            tool_calls = fast_result.get("tool_calls")
+            print(f"⚡ FAST: {ai_text[:80]} ({elapsed}s)")
+
+            emit("ai_response", {
+                "text": ai_text,
+                "tool_calls": tool_calls,
+                "response_time": elapsed
+            })
+
+            # TTS in background
+            def generate_and_send_audio_fast():
+                audio_b64 = text_to_speech_base64(ai_text)
+                if audio_b64:
+                    socketio.emit("tts_audio", {"audio": audio_b64})
+            threading.Thread(target=generate_and_send_audio_fast, daemon=True).start()
+
+            emit("thinking", {"status": False})
+            return
+
+        # SLOW PATH: Full AI processing (for complex/conversational queries)
         result = get_ai_response(user_text)
         elapsed = round(time.time() - start, 2)
 

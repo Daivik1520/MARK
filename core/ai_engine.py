@@ -1011,10 +1011,10 @@ def _call_openrouter(messages, use_tools=True):
             payload["tools"] = TOOLS
             payload["tool_choice"] = "auto"
 
-        for attempt in range(3):
+        for attempt in range(2):  # 2 attempts max (was 3)
             try:
-                print(f"  → Trying {model} (attempt {attempt + 1}/3)...")
-                resp = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=60)
+                print(f"  → Trying {model} (attempt {attempt + 1}/2)...")
+                resp = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=15)  # 15s (was 60s)
 
                 if resp.status_code == 200:
                     data = resp.json()
@@ -1025,7 +1025,7 @@ def _call_openrouter(messages, use_tools=True):
                     break
 
                 elif resp.status_code == 429:
-                    wait = (attempt + 1) * 4
+                    wait = (attempt + 1) * 2  # 2s, 4s (was 4s, 8s, 12s)
                     print(f"  ⏳ Rate limited on {model}, waiting {wait}s...")
                     time.sleep(wait)
                     continue
@@ -1035,7 +1035,7 @@ def _call_openrouter(messages, use_tools=True):
                     break
 
                 elif resp.status_code >= 500:
-                    time.sleep((attempt + 1) * 2)
+                    time.sleep(1)  # 1s (was 2s/4s)
                     continue
 
                 else:
@@ -1107,17 +1107,9 @@ def get_ai_response(user_message):
             tool_results.append({"tool_call_id": tc_id, "name": func_name, "result": result})
             conversation_history.append({"role": "tool", "tool_call_id": tc_id, "content": result})
 
-        # Follow-up response after tool execution
-        msgs2 = [{"role": "system", "content": SYSTEM_PROMPT}] + conversation_history
-        data2 = _call_openrouter(msgs2, use_tools=False)
-
-        if data2:
-            follow_up = data2["choices"][0]["message"].get("content", "")
-        else:
-            follow_up = tool_results[0]["result"] if tool_results else "Action completed, sir."
-
-        if not follow_up:
-            follow_up = tool_results[0]["result"] if tool_results else "Done, sir."
+        # Use tool result directly — NO second AI call needed
+        # This saves 2-8 seconds per tool command
+        follow_up = tool_results[0]["result"] if tool_results else "Done, sir."
 
         conversation_history.append({"role": "assistant", "content": follow_up})
         return {"text": follow_up, "tool_calls": tool_results}
