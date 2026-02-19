@@ -1627,3 +1627,138 @@ body {
         padding: 5px 12px;
     }
 }
+
+/* ═══════════════════════════════════════════════════════════════
+   HOLOGRAPHIC HUD
+   ═══════════════════════════════════════════════════════════════ */
+
+.hud-overlay {
+    position: fixed;
+    top: 80px;
+    right: 20px;
+    z-index: 10000;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    pointer-events: none;
+    max-width: 380px;
+    width: 100%;
+}
+
+.hud-card {
+    pointer-events: auto;
+    background: rgba(10, 10, 18, 0.78);
+    backdrop-filter: blur(28px) saturate(180%);
+    -webkit-backdrop-filter: blur(28px) saturate(180%);
+    border: 1px solid rgba(255, 106, 0, 0.22);
+    border-radius: var(--r-lg);
+    padding: 20px 22px;
+    color: var(--text-1);
+    box-shadow:
+        0 0 30px rgba(255, 106, 0, 0.08),
+        0 8px 32px rgba(0, 0, 0, 0.55),
+        inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    animation: hudSlideIn 0.45s var(--ease-out) forwards;
+    transform: translateX(120%);
+    opacity: 0;
+    font-family: 'Inter', sans-serif;
+    position: relative;
+    overflow: hidden;
+}
+
+.hud-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
+    opacity: 0.6;
+}
+
+.hud-card.dismissing {
+    animation: hudSlideOut 0.35s var(--ease) forwards;
+}
+
+.hud-card-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.hud-card-icon {
+    font-size: 22px;
+    width: 38px;
+    height: 38px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(255, 106, 0, 0.12);
+    border-radius: var(--r-md);
+    flex-shrink: 0;
+}
+
+.hud-card-title {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+}
+
+.hud-card-body {
+    font-size: 13.5px;
+    line-height: 1.65;
+    color: var(--text-2);
+    white-space: pre-wrap;
+}
+
+.hud-card-body strong {
+    color: var(--text-1);
+    font-weight: 600;
+}
+
+.hud-card-timer {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    height: 2px;
+    background: var(--accent);
+    opacity: 0.5;
+    animation: hudTimer linear forwards;
+}
+
+.hud-card-close {
+    position: absolute;
+    top: 10px;
+    right: 12px;
+    background: none;
+    border: none;
+    color: var(--text-3);
+    cursor: pointer;
+    font-size: 16px;
+    padding: 4px;
+    line-height: 1;
+    transition: color var(--t-fast);
+}
+
+.hud-card-close:hover {
+    color: var(--text-1);
+}
+
+@keyframes hudSlideIn {
+    from { transform: translateX(120%); opacity: 0; }
+    to   { transform: translateX(0);    opacity: 1; }
+}
+
+@keyframes hudSlideOut {
+    from { transform: translateX(0);    opacity: 1; }
+    to   { transform: translateX(120%); opacity: 0; }
+}
+
+@keyframes hudTimer {
+    from { width: 100%; }
+    to   { width: 0%; }
+}

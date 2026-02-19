@@ -913,6 +913,43 @@ socket.on('proactive_alert', (data) => {
     }
 });
 
+// ── Holographic HUD Cards ──
+socket.on('hud_card', (data) => {
+    const overlay = document.getElementById('hudOverlay');
+    if (!overlay) return;
+
+    const duration = (data.duration || 8) * 1000;
+    const card = document.createElement('div');
+    card.className = 'hud-card';
+    card.innerHTML = `
+        <button class="hud-card-close" title="Dismiss">×</button>
+        <div class="hud-card-header">
+            <div class="hud-card-icon">${data.icon || '🔮'}</div>
+            <div class="hud-card-title">${data.title || 'MARK HUD'}</div>
+        </div>
+        <div class="hud-card-body">${data.content || ''}</div>
+        <div class="hud-card-timer" style="animation-duration: ${duration}ms;"></div>
+    `;
+
+    // Close button
+    card.querySelector('.hud-card-close').addEventListener('click', () => dismissHud(card));
+
+    overlay.appendChild(card);
+
+    // Auto-dismiss
+    const timer = setTimeout(() => dismissHud(card), duration);
+    card._hudTimer = timer;
+
+    function dismissHud(el) {
+        if (el._dismissed) return;
+        el._dismissed = true;
+        clearTimeout(el._hudTimer);
+        el.classList.add('dismissing');
+        setTimeout(() => el.remove(), 400);
+    }
+});
+
+
 // Reset conversation
 DOM.btnReset.addEventListener('click', () => {
     socket.emit('reset_chat');

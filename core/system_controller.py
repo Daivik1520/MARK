@@ -15,19 +15,27 @@ load_dotenv()
 SERPAPI_KEY = os.getenv("SERPAPI_KEY", "")
 
 # Import feature modules
-from memory_manager import save_memory, recall_memory, list_memories, delete_memory
-from vision_engine import analyze_screen
-from routines import run_routine, list_routines, create_routine
-from reminder_manager import set_reminder, list_reminders, delete_reminder, clear_reminders
-from phone_tracker import track_number
-from clipboard_manager import get_clipboard_history, search_clipboard, paste_from_history, start_clipboard_monitor
-from context_engine import get_context
-from news_briefing import get_news_briefing, get_news
-from code_runner import run_code
-from password_gen import generate_password
-from proactive_monitor import get_system_stats
-from window_manager import tile_windows, focus_app, dim_all_except, move_window, show_all_windows, get_open_windows, maximize_window
-from web_steerer import web_search_deep, web_get_stock, web_book_restaurant, web_navigate
+# Import feature modules
+from tools.memory_manager import save_memory, recall_memory, list_memories, delete_memory
+from tools.vision_engine import analyze_screen
+from services.routines import run_routine, list_routines, create_routine
+from tools.reminder_manager import set_reminder, list_reminders, delete_reminder, clear_reminders
+from tools.phone_tracker import track_number
+from tools.clipboard_manager import get_clipboard_history, search_clipboard, paste_from_history, start_clipboard_monitor
+from core.context_engine import get_context
+from tools.news_briefing import get_news_briefing, get_news
+from tools.code_runner import run_code
+from tools.password_gen import generate_password
+from services.proactive_monitor import get_system_stats
+from tools.window_manager import tile_windows, focus_app, dim_all_except, move_window, show_all_windows, get_open_windows, maximize_window
+from agents.web_steerer import web_search_deep, web_get_stock, web_book_restaurant, web_navigate
+from tools.digital_janitor import clean_desktop, organize_downloads
+from agents.code_writer import write_code
+from agents.research_agent import research_topic
+from tools.image_tools import edit_image
+from services.focus_bubble import start_focus, stop_focus
+from agents.browser_copilot import browser_do
+from agents.universal_search import search_content
 
 
 def _run_applescript(script: str) -> str:
@@ -549,6 +557,22 @@ TOOL_MAP = {
     "web_get_stock": web_get_stock,
     "web_book_restaurant": web_book_restaurant,
     "web_navigate": web_navigate,
+    # Digital Janitor
+    "clean_desktop": clean_desktop,
+    "organize_downloads": organize_downloads,
+    # Code Writer
+    "write_code": write_code,
+    # Research Agent
+    "research_topic": research_topic,
+    # Image Tools
+    "edit_image": edit_image,
+    # Focus Bubble
+    "start_focus": start_focus,
+    "stop_focus": stop_focus,
+    # Browser Copilot
+    "browser_do": browser_do,
+    # Universal Search
+    "search_content": search_content,
 }
 
 # Free models often send wrong param names. Map common variants to correct ones.
@@ -591,6 +615,25 @@ ARGUMENT_ALIASES = {
     "web_get_stock": {"symbol": "ticker", "stock": "ticker", "company": "ticker"},
     "web_book_restaurant": {"food": "query", "type": "query", "cuisine": "query", "city": "location", "area": "location", "where": "location"},
     "web_navigate": {"link": "url", "site": "url", "page": "url", "address": "url"},
+    "clean_desktop": {},
+    "organize_downloads": {},
+    "show_hud_card": {"text": "content", "body": "content", "message": "content", "heading": "title",
+                      "emoji": "icon", "time": "duration", "seconds": "duration"},
+    "write_code": {"desc": "description", "prompt": "description", "what": "description", "task": "description",
+                   "lang": "language", "type": "language", "in": "language",
+                   "name": "filename", "file": "filename", "save_as": "filename"},
+    "research_topic": {"query": "topic", "subject": "topic", "about": "topic", "search": "topic",
+                        "level": "depth", "mode": "depth", "type": "depth"},
+    "edit_image": {"image": "input_path", "source": "input_path", "file": "input_path", "input": "input_path",
+                   "output": "output_path", "save_as": "output_path", "dest": "output_path",
+                   "ops": "operations", "actions": "operations", "edits": "operations", "do": "operations"},
+    "start_focus": {"duration": "duration_minutes", "time": "duration_minutes", "minutes": "duration_minutes",
+                    "apps": "blocked_apps", "block_apps": "blocked_apps",
+                    "sites": "blocked_sites", "block_sites": "blocked_sites", "websites": "blocked_sites"},
+    "stop_focus": {},
+    "browser_do": {"action": "task", "command": "task", "do": "task", "request": "task", "instructions": "task"},
+    "search_content": {"search": "query", "find": "query", "look_for": "query", "text": "query",
+                        "dirs": "directories", "folders": "directories", "paths": "directories", "in": "directories"},
 }
 
 

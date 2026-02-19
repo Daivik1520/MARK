@@ -11,13 +11,14 @@ from werkzeug.utils import secure_filename
 from flask_socketio import SocketIO, emit
 from dotenv import load_dotenv
 
-from ai_engine import get_ai_response, reset_conversation, get_system_prompt, set_system_prompt
-from tts_engine import text_to_speech_base64
-from reminder_manager import start_scheduler as start_reminder_scheduler
-from clipboard_manager import start_clipboard_monitor
-from gesture_controller import execute_gesture
-from proactive_monitor import start_proactive_monitor
-from system_controller import set_brightness
+from core.ai_engine import get_ai_response, reset_conversation, get_system_prompt, set_system_prompt
+from core.tts_engine import text_to_speech_base64
+from tools.reminder_manager import start_scheduler as start_reminder_scheduler
+from tools.clipboard_manager import start_clipboard_monitor
+from services.gesture_controller import execute_gesture
+from services.proactive_monitor import start_proactive_monitor
+from core.system_controller import set_brightness, TOOL_MAP
+from services.focus_bubble import set_socketio as focus_set_socketio
 
 load_dotenv()
 
@@ -210,5 +211,23 @@ if __name__ == "__main__":
     start_reminder_scheduler(socketio)
     start_clipboard_monitor()
     start_proactive_monitor(socketio)
+    focus_set_socketio(socketio)
+
+    # Register the HUD card tool (needs socketio instance)
+    def show_hud_card(title="MARK HUD", content="", icon="🔮", duration=8):
+        """Emit a HUD card event to the frontend."""
+        try:
+            duration = int(duration)
+        except (ValueError, TypeError):
+            duration = 8
+        socketio.emit("hud_card", {
+            "title": title,
+            "content": content,
+            "icon": icon,
+            "duration": duration,
+        })
+        return f"HUD card displayed: {title}"
+
+    TOOL_MAP["show_hud_card"] = show_hud_card
 
     socketio.run(app, host="0.0.0.0", port=5001, debug=False, allow_unsafe_werkzeug=True)

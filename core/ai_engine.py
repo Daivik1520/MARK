@@ -9,7 +9,7 @@ import json
 import time
 import requests
 from dotenv import load_dotenv
-from system_controller import execute_tool
+from core.system_controller import execute_tool
 
 load_dotenv()
 
@@ -138,6 +138,53 @@ Use web_get_stock(ticker) to fetch live stock price and change from Yahoo Financ
 Use web_book_restaurant(query, location) to find restaurants with ratings and links.
 Use web_navigate(url) to visit any URL and return the page content.
 When user says "look up", "search the web", "find a restaurant", "what is Tesla's stock", use these tools.
+
+HOLOGRAPHIC HUD:
+Use show_hud_card(title, content, icon, duration) to display a floating glass card on screen.
+Perfect for showing quick info like weather, system stats, reminders, or search results.
+The card appears as a transparent overlay, auto-dismisses. Use when results are short and visual.
+
+DIGITAL JANITOR (File Cleanup):
+Use clean_desktop to organize and clean up the user's Desktop automatically.
+Use organize_downloads to clean up the Downloads folder.
+Moves files into categories: Screenshots, PDFs, Code, Images, Videos, Archives, etc.
+Deletes old .dmg/.pkg files older than 7 days.
+When user says "clean my desktop", "organize files", "tidy up", use these tools.
+
+CODE WRITER (AI-Generated Code):
+Use write_code(description, language, filename) to generate code from a natural language description.
+The code is written to a file on the Desktop and opened in TextEdit for review.
+Does NOT execute the code — only writes it. When user says "write a script", "create a program",
+"make a python file that...", use this tool.
+
+RESEARCH AGENT:
+Use research_topic(topic, depth) for autonomous research. MARK searches the web, reads multiple pages,
+and generates a formatted Markdown report saved to the Desktop.
+depth can be "quick" (3 sources) or "deep" (10 sources).
+When user says "research X", "prepare a briefing on", "deep dive into", use this tool.
+
+IMAGE EDITOR:
+Use edit_image(input_path, output_path, operations) for voice-controlled image manipulation.
+Operations are comma-separated: crop_square, resize:WxH, watermark:TEXT, rotate:DEGREES,
+grayscale, blur:RADIUS, flip:horizontal, brightness:1.2, contrast:1.3.
+When user says "crop", "resize", "add watermark", "edit image", use this tool.
+
+FOCUS BUBBLE (Distraction Shield):
+Use start_focus(duration_minutes, blocked_apps, blocked_sites) to start a focus session.
+Blocks social media apps (auto-closes them) and browser tabs with distracting sites.
+Sends HUD warnings to keep user on track. Default: 60 min, blocks Twitter/Reddit/YouTube/Discord etc.
+Use stop_focus to end a session early. When user says "lock me in", "focus mode", "no distractions", use start_focus.
+
+BROWSER COPILOT:
+Use browser_do(task) for hands-free browser automation. Takes a plain English description.
+Launches a VISIBLE browser window and clicks, types, scrolls automatically.
+The user can watch the browser work in real-time. Takes a screenshot at the end.
+When user says "go to Amazon and search", "open Google and find", "browse to", use browser_do.
+
+UNIVERSAL SEARCH (Semantic Desktop Search):
+Use search_content(query, directories) to find files by CONTENT, not filename.
+Searches text files in ~/Documents, ~/Desktop, ~/Downloads using TF-IDF ranking.
+When user says "find the document about", "search my files for", "where did I save that thing about", use search_content.
 
 Important rules:
 - Always confirm actions before executing dangerous operations (shutdown, restart).
@@ -776,6 +823,147 @@ TOOLS = [
                 "type": "object",
                 "properties": {"url": {"type": "string", "description": "Full URL to visit"}},
                 "required": ["url"]
+            }
+        }
+    },
+    # ── HOLOGRAPHIC HUD ──
+    {
+        "type": "function",
+        "function": {
+            "name": "show_hud_card",
+            "description": "Display a floating glassmorphism card on the user's screen. Great for short info displays like weather, stats, quick answers.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Card title (short, uppercase-style)"},
+                    "content": {"type": "string", "description": "Card body text (supports basic HTML: <strong>, <br>)"},
+                    "icon": {"type": "string", "description": "Emoji icon for the card header (default: 🔮)"},
+                    "duration": {"type": "integer", "description": "Seconds to show before auto-dismiss (default: 8)"}
+                },
+                "required": ["title", "content"]
+            }
+        }
+    },
+    # ── DIGITAL JANITOR ──
+    {
+        "type": "function",
+        "function": {
+            "name": "clean_desktop",
+            "description": "Organize and clean up the Desktop. Moves files into categorized folders (Screenshots, PDFs, Code, Images, etc.) and deletes old installers.",
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "organize_downloads",
+            "description": "Organize and clean up the Downloads folder. Same as clean_desktop but for Downloads.",
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    # ── CODE WRITER ──
+    {
+        "type": "function",
+        "function": {
+            "name": "write_code",
+            "description": "Generate code from a natural language description. Writes to a file on the Desktop and opens it for review. Does NOT execute the code.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "description": {"type": "string", "description": "What the code should do"},
+                    "language": {"type": "string", "description": "Programming language (default: python)"},
+                    "filename": {"type": "string", "description": "Optional output filename"}
+                },
+                "required": ["description"]
+            }
+        }
+    },
+    # ── RESEARCH AGENT ──
+    {
+        "type": "function",
+        "function": {
+            "name": "research_topic",
+            "description": "Research a topic autonomously: search the web, scrape pages, and generate a formatted Markdown report saved to the Desktop.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string", "description": "Topic to research"},
+                    "depth": {"type": "string", "description": "'quick' (3 sources) or 'deep' (10 sources). Default: quick"}
+                },
+                "required": ["topic"]
+            }
+        }
+    },
+    # ── IMAGE TOOLS ──
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_image",
+            "description": "Edit an image with chained operations: crop_square, resize:WxH, watermark:TEXT, rotate:DEGREES, grayscale, blur:RADIUS, flip:horizontal, brightness:1.2, contrast:1.3.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "input_path": {"type": "string", "description": "Path to source image (supports ~)"},
+                    "output_path": {"type": "string", "description": "Where to save result (default: Desktop with _edited suffix)"},
+                    "operations": {"type": "string", "description": "Comma-separated operations, e.g. 'crop_square,watermark:CONFIDENTIAL,resize:800x800'"}
+                },
+                "required": ["input_path", "operations"]
+            }
+        }
+    },
+    # ── FOCUS BUBBLE ──
+    {
+        "type": "function",
+        "function": {
+            "name": "start_focus",
+            "description": "Start a focus session. Blocks distracting apps and websites for the specified duration. Auto-closes blacklisted apps and browser tabs.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "duration_minutes": {"type": "string", "description": "Duration in minutes (default: 60)"},
+                    "blocked_apps": {"type": "string", "description": "Comma-separated app names to block (default: social media)"},
+                    "blocked_sites": {"type": "string", "description": "Comma-separated domains to block (default: social media)"}
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "stop_focus",
+            "description": "End the current focus session early. Returns a session summary.",
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    # ── BROWSER COPILOT ──
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_do",
+            "description": "Execute a browser task described in natural language. Opens a visible browser window and performs clicks, typing, scrolling automatically. Takes a screenshot of the result.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string", "description": "Plain English description of what to do in the browser"}
+                },
+                "required": ["task"]
+            }
+        }
+    },
+    # ── UNIVERSAL SEARCH ──
+    {
+        "type": "function",
+        "function": {
+            "name": "search_content",
+            "description": "Search local files by content using semantic matching. Finds documents by what they contain, not their filename. Searches ~/Documents, ~/Desktop, ~/Downloads.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "What to search for"},
+                    "directories": {"type": "string", "description": "Comma-separated directories to search (default: ~/Documents, ~/Desktop, ~/Downloads)"}
+                },
+                "required": ["query"]
             }
         }
     }
