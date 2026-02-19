@@ -3,7 +3,7 @@
 <!-- Animated Header -->
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=30&height=300&section=header&text=M.A.R.K.&fontSize=80&fontColor=ffffff&animation=fadeIn&fontAlignY=38&desc=AI%20System%20Controller&descAlignY=51&descAlign=50">
-  <img alt="M.A.R.K. Header" src="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=30&height=300&section=header&text=M.A.R.K.&fontSize=80&fontColor=ffffff&animation=fadeIn&fontAlignY=38&desc=AI%20System%20Controller&descAlignY=51&descAlign=50">
+  <img alt="M.A.R.K. Header" src="https://capsule-render.vercel.app/api?type=waving&color=0:0a0a0a,50:1a1a2e,100:e65100&height=220&section=header&text=M.A.R.K.&fontSize=80&fontColor=ffffff&animation=fadeIn&fontAlignY=38&desc=Machine%20Augmented%20Reality%20Kernel&descSize=18&descAlignY=58&descAlign=50" width="100%">
 </picture>
 
 <p align="center">
