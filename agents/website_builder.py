@@ -20,53 +20,73 @@ MODELS = [
     "meta-llama/llama-4-maverick:free",
 ]
 
-WEBSITE_SYSTEM_PROMPT = """You are an expert frontend web developer. Given a website description, generate a COMPLETE, production-quality, single-page website.
+# ─────────────────────────────────────────────
+# GENERATE EACH FILE SEPARATELY (more reliable)
+# ─────────────────────────────────────────────
 
-You MUST output a valid JSON object with exactly these 3 keys:
-{
-  "html": "the full HTML content (do NOT include <link> or <script> tags for style.css/script.js — they will be injected automatically)",
-  "css": "the complete CSS stylesheet",
-  "js": "the complete JavaScript (can be empty string if not needed)"
-}
+HTML_PROMPT = """You are an expert frontend developer. Generate a COMPLETE, beautiful, production-quality HTML file for the following website.
 
 Rules:
-- Output ONLY the JSON. No markdown, no explanation.
-- The HTML must be a complete document with <!DOCTYPE html>, <head>, <body>.
-- Do NOT include <link href="style.css"> or <script src="script.js"> — they are auto-injected.
-- Use modern, beautiful design: CSS Grid/Flexbox, smooth gradients, subtle shadows, rounded corners.
-- Use a cohesive color palette. Prefer dark themes with vibrant accents unless told otherwise.
-- Add proper Google Fonts (import via @import in CSS).
-- Make it fully responsive (mobile-friendly).
-- Include hover effects, transitions, and micro-animations.
-- The website must be COMPLETE and FUNCTIONAL — not a skeleton.
-- For interactive features (calendar, calculator, todo, etc.), write full working JavaScript.
+- Output ONLY the raw HTML code. No markdown, no explanations, no code fences.
+- Must be a complete HTML document with <!DOCTYPE html>, <head>, <body>.
+- Include <link rel="stylesheet" href="style.css"> in <head>.
+- Include <script src="script.js"></script> before </body>.
+- Use semantic HTML5 elements.
+- Include a proper <title>.
+- Use Google Fonts via <link> tag if appropriate.
+- The page must be fully structured and complete — not a skeleton.
+"""
+
+CSS_PROMPT = """You are an expert CSS developer. Generate a COMPLETE, beautiful stylesheet for the website described below.
+
+Rules:
+- Output ONLY the raw CSS code. No markdown, no explanations, no code fences.
+- Use modern CSS: flexbox, grid, custom properties, smooth transitions.
+- Use a dark theme with vibrant accent colors (unless told otherwise).
+- Include hover effects, subtle animations, and smooth transitions.
+- Make it fully responsive with media queries.
+- Use Google Fonts (@import at the top if not linked in HTML).
 - The design should look premium and modern — not basic or generic.
+- Include a proper reset/normalize at the top.
+"""
+
+JS_PROMPT = """You are an expert JavaScript developer. Generate the complete JavaScript for the website described below.
+
+Rules:
+- Output ONLY the raw JavaScript code. No markdown, no explanations, no code fences.
+- Use modern ES6+ (const/let, arrow functions, template literals).
+- If the site is static (portfolio, landing page), output just a comment: // No JavaScript needed
+- If the site needs interactivity (todo, calculator, calendar), write FULL working logic.
+- Use vanilla JavaScript — no frameworks.
+- Add event listeners with DOMContentLoaded.
+- Make it production-ready with error handling.
 """
 
 
-def _generate_website_json(description):
-    """Call AI to generate website files as JSON."""
+def _call_ai(system_prompt, user_prompt):
+    """Call OpenRouter with retry across models. Returns raw text."""
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
     }
     messages = [
-        {"role": "system", "content": WEBSITE_SYSTEM_PROMPT},
-        {"role": "user", "content": f"Build this website: {description}"},
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
     ]
 
     for model in MODELS:
         try:
+            print(f"    → Trying {model}...")
             resp = requests.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers=headers,
-                json={"model": model, "messages": messages, "max_tokens": 8192, "temperature": 0.3},
-                timeout=30,
+                json={"model": model, "messages": messages, "max_tokens": 4096, "temperature": 0.3},
+                timeout=25,
             )
             if resp.status_code == 200:
                 content = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
                 if content:
-                    # Strip markdown fences if present
+                    # Strip markdown code fences if present
                     if content.startswith("```"):
                         lines = content.split("\n")
                         if lines[-1].strip() == "```":
@@ -74,40 +94,24 @@ def _generate_website_json(description):
                         else:
                             lines = lines[1:]
                         content = "\n".join(lines)
-                    return json.loads(content)
+                    print(f"    ✓ Got {len(content)} chars from {model}")
+                    return content
             elif resp.status_code in (402, 404):
+                print(f"    ✗ {resp.status_code} on {model}, skipping")
                 continue
             elif resp.status_code == 429:
+                print(f"    ✗ Rate limited on {model}")
                 import time
                 time.sleep(2)
                 continue
-        except json.JSONDecodeError:
+            else:
+                print(f"    ✗ {resp.status_code} on {model}")
+                continue
+        except Exception as e:
+            print(f"    ✗ Error on {model}: {e}")
             continue
-        except Exception:
-            continue
+
     return None
-
-
-def _inject_links(html, has_css, has_js):
-    """Inject <link> and <script> tags into the HTML <head> and <body>."""
-    css_tag = '<link rel="stylesheet" href="style.css">'
-    js_tag = '<script src="script.js"></script>'
-
-    # Inject CSS link before </head>
-    if has_css:
-        if "</head>" in html:
-            html = html.replace("</head>", f"    {css_tag}\n</head>")
-        else:
-            html = f"{css_tag}\n{html}"
-
-    # Inject JS script before </body>
-    if has_js:
-        if "</body>" in html:
-            html = html.replace("</body>", f"    {js_tag}\n</body>")
-        else:
-            html = f"{html}\n{js_tag}"
-
-    return html
 
 
 def build_website(description, name=""):
@@ -128,55 +132,59 @@ def build_website(description, name=""):
     # Generate folder name
     if not name:
         words = description.lower().split()
-        # Remove filler words
         skip = {"a", "an", "the", "make", "build", "create", "website", "site", "page", "web", "for", "me", "my"}
         clean = [w for w in words if w.isalnum() and w not in skip][:4]
         name = "-".join(clean) if clean else "my-website"
 
     name = name.replace(" ", "-").lower()
 
-    # Create folder on Desktop
+    # Create folder
     project_dir = os.path.join(os.path.expanduser("~/Desktop"), name)
     os.makedirs(project_dir, exist_ok=True)
 
-    # Generate website from AI
-    print(f"  🌐 Generating website: {description}")
-    result = _generate_website_json(description)
+    task = f"Build this website: {description}"
 
-    if not result or not isinstance(result, dict):
-        return "❌ Failed to generate website. Please try again."
+    # Generate HTML
+    print(f"  🌐 [1/3] Generating HTML...")
+    html = _call_ai(HTML_PROMPT, task)
+    if not html:
+        return "❌ Failed to generate HTML. AI models may be rate-limited — try again in a moment."
 
-    html_content = result.get("html", "")
-    css_content = result.get("css", "")
-    js_content = result.get("js", "")
+    # Generate CSS
+    print(f"  🎨 [2/3] Generating CSS...")
+    css = _call_ai(CSS_PROMPT, task + "\n\nThe HTML structure is:\n" + html[:1500])
+    if not css:
+        css = "/* CSS generation failed — add your styles here */\nbody { font-family: sans-serif; margin: 0; padding: 20px; background: #1a1a2e; color: #eee; }"
 
-    if not html_content:
-        return "❌ AI returned empty HTML. Please try again."
+    # Generate JS
+    print(f"  ⚡ [3/3] Generating JavaScript...")
+    js = _call_ai(JS_PROMPT, task + "\n\nThe HTML structure is:\n" + html[:1500])
+    if not js:
+        js = "// JavaScript generation failed — add your logic here\nconsole.log('Website loaded');"
 
-    # Inject <link> and <script> tags
-    html_content = _inject_links(html_content, bool(css_content), bool(js_content))
+    # Ensure HTML has CSS and JS links
+    if "style.css" not in html:
+        html = html.replace("</head>", '    <link rel="stylesheet" href="style.css">\n</head>')
+    if "script.js" not in html:
+        html = html.replace("</body>", '    <script src="script.js"></script>\n</body>')
 
     # Write files
     files_written = []
 
-    html_path = os.path.join(project_dir, "index.html")
-    with open(html_path, "w", encoding="utf-8") as f:
-        f.write(html_content)
+    with open(os.path.join(project_dir, "index.html"), "w", encoding="utf-8") as f:
+        f.write(html)
     files_written.append("index.html")
 
-    if css_content:
-        css_path = os.path.join(project_dir, "style.css")
-        with open(css_path, "w", encoding="utf-8") as f:
-            f.write(css_content)
-        files_written.append("style.css")
+    with open(os.path.join(project_dir, "style.css"), "w", encoding="utf-8") as f:
+        f.write(css)
+    files_written.append("style.css")
 
-    if js_content:
-        js_path = os.path.join(project_dir, "script.js")
-        with open(js_path, "w", encoding="utf-8") as f:
-            f.write(js_content)
-        files_written.append("script.js")
+    with open(os.path.join(project_dir, "script.js"), "w", encoding="utf-8") as f:
+        f.write(js)
+    files_written.append("script.js")
 
-    # Open in default browser
+    # Open in browser
+    html_path = os.path.join(project_dir, "index.html")
     try:
         subprocess.Popen(["open", html_path])
     except Exception:
