@@ -40,16 +40,31 @@ def _dictate_native():
         print(f"  ⚠️  Dictation trigger error: {e}")
 
 
+_pressed_keys = set()
+
+
 def _on_key_press(key):
-    """Start dictation when F8 is pressed."""
+    """Track pressed keys and trigger dictation on Ctrl+Option+Shift."""
+    _pressed_keys.add(key)
     try:
         from pynput.keyboard import Key
-        if key == Key.f8:
-            print("🎙️  F8 pressed — activating macOS dictation")
+        # Ctrl + Option (Alt) + Shift — all three held at once
+        has_ctrl  = Key.ctrl  in _pressed_keys or Key.ctrl_l  in _pressed_keys or Key.ctrl_r  in _pressed_keys
+        has_alt   = Key.alt   in _pressed_keys or Key.alt_l   in _pressed_keys or Key.alt_r   in _pressed_keys
+        has_shift = Key.shift in _pressed_keys or Key.shift_l in _pressed_keys or Key.shift_r in _pressed_keys
+
+        if has_ctrl and has_alt and has_shift:
+            # Clear so it doesn't fire repeatedly while held
+            _pressed_keys.clear()
+            print("🎙️  Ctrl+Option+Shift — activating macOS dictation")
             threading.Thread(target=_dictate_native, daemon=True).start()
     except Exception:
         pass
 
+
+def _on_key_release(key):
+    """Remove released keys from tracker."""
+    _pressed_keys.discard(key)
 
 def start_dictation(sio_instance=None):
     """Start the dictation hotkey listener."""
@@ -59,10 +74,10 @@ def start_dictation(sio_instance=None):
     try:
         from pynput import keyboard
 
-        listener = keyboard.Listener(on_press=_on_key_press)
+        listener = keyboard.Listener(on_press=_on_key_press, on_release=_on_key_release)
         listener.daemon = True
         listener.start()
-        print("  🎙️  Dictation service ready — press F8 to activate macOS dictation")
+        print("  🎙️  Dictation service ready — press Ctrl+Option+Shift to activate macOS dictation")
     except ImportError:
         print("  ⚠️  pynput not installed. Dictation hotkey disabled.")
     except Exception as e:
