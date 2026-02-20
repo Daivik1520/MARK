@@ -32,7 +32,7 @@ load_dotenv()
 
 app = FastAPI(title="MARK AI System Controller")
 sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
-socket_app = socketio.ASGIApp(sio, other_app=app)
+socket_app = socketio.ASGIApp(sio, app)
 
 
 # ─────────────────────────────────────────────
