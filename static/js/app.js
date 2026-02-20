@@ -246,7 +246,11 @@ function scrollToBottom() {
 // ─────────────────────────────────────────────
 
 const WAKE_WORD = 'mark';
-const WAKE_VARIANTS = ['mark', 'marc', 'park', 'dark', 'bark', 'marque', 'marks']; // fuzzy matching
+const WAKE_VARIANTS = [
+    'mark', 'marc', 'park', 'dark', 'bark', 'marque', 'marks',
+    'march', 'marsh', 'mock', 'mach', 'mart', 'marck', 'maak',
+    'marg', 'mak', 'mac', 'mar', 'marquee', 'markk'
+];
 
 function initSpeechRecognition() {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -273,7 +277,16 @@ function handleSpeechResult(event) {
 
     for (let i = event.resultIndex; i < event.results.length; i++) {
         const result = event.results[i];
-        const transcript = result[0].transcript;
+        // Check ALL alternatives for wake word (not just top result)
+        let bestTranscript = result[0].transcript;
+        for (let a = 0; a < result.length; a++) {
+            const alt = result[a].transcript;
+            if (detectWakeWord(alt.toLowerCase().trim())) {
+                bestTranscript = alt; // Use the alternative that matched the wake word
+                break;
+            }
+        }
+        const transcript = bestTranscript;
 
         if (result.isFinal) {
             finalTranscript += transcript;
@@ -295,7 +308,10 @@ function handleSpeechResult(event) {
 
     // ── MODE: Wake word listening ──
     if (state.wakeWordEnabled) {
-        const fullText = (finalTranscript || interimTranscript).toLowerCase().trim();
+        // Check BOTH interim and final for fastest wake word detection
+        const interimCheck = interimTranscript.toLowerCase().trim();
+        const finalCheck = finalTranscript.toLowerCase().trim();
+        const fullText = finalCheck || interimCheck;
 
         // Already in command mode — capture the command
         if (state.commandMode) {
@@ -353,7 +369,7 @@ function handleSpeechResult(event) {
         if (detectWakeWord(fullText)) {
             if (state.wakeWordCooldown) return;
             state.wakeWordCooldown = true;
-            setTimeout(() => { state.wakeWordCooldown = false; }, 2000);
+            setTimeout(() => { state.wakeWordCooldown = false; }, 1000); // 1s cooldown (was 2s)
 
             // Extract command after wake word if present
             const afterWake = extractCommandAfterWake(fullText);
@@ -402,16 +418,36 @@ function handleSpeechResult(event) {
 }
 
 function detectWakeWord(text) {
-    const words = text.toLowerCase().split(/\s+/);
+    const lower = text.toLowerCase();
+    const words = lower.split(/[\s,.!?;:]+/).filter(w => w.length > 0);
+
     for (const word of words) {
-        // Direct match
+        // Exact match against variants
         if (WAKE_VARIANTS.includes(word)) return true;
-        // Fuzzy: check if any word starts with "mark"
+        // Starts with "mark"
         if (word.startsWith('mark')) return true;
+        // Fuzzy: Levenshtein distance ≤ 1 from "mark"
+        if (word.length >= 3 && word.length <= 6 && levenshtein(word, 'mark') <= 1) return true;
     }
-    // Also check if the whole text contains "hey mark" or "ok mark"
-    if (text.includes('hey mark') || text.includes('okay mark') || text.includes('ok mark')) return true;
+    // Phrase-level checks
+    if (lower.includes('hey mark') || lower.includes('okay mark') || lower.includes('ok mark')) return true;
+    if (lower.includes('hey marc') || lower.includes('okay marc') || lower.includes('ok marc')) return true;
     return false;
+}
+
+// Levenshtein distance for fuzzy wake word matching
+function levenshtein(a, b) {
+    const m = a.length, n = b.length;
+    const d = Array.from({ length: m + 1 }, (_, i) => [i]);
+    for (let j = 1; j <= n; j++) d[0][j] = j;
+    for (let i = 1; i <= m; i++) {
+        for (let j = 1; j <= n; j++) {
+            d[i][j] = a[i - 1] === b[j - 1]
+                ? d[i - 1][j - 1]
+                : 1 + Math.min(d[i - 1][j], d[i][j - 1], d[i - 1][j - 1]);
+        }
+    }
+    return d[m][n];
 }
 
 function extractCommandAfterWake(text) {
@@ -452,7 +488,7 @@ function handleSpeechError(event) {
 function handleSpeechEnd() {
     // Auto-restart if wake word mode is active
     if (state.wakeWordEnabled && !state.isThinking) {
-        setTimeout(() => startWakeWordListener(), 200);
+        setTimeout(() => startWakeWordListener(), 100); // 100ms restart (was 200ms)
     } else if (state.isRecording) {
         stopRecording();
     }
