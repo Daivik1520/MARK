@@ -82,9 +82,9 @@ def _start_hotkey_listener():
 
         def on_press(key):
             pressed.add(key)
-            # Check for Option + Space
+            # Check for Command + Space
             try:
-                if (keyboard.Key.alt in pressed or keyboard.Key.alt_l in pressed or keyboard.Key.alt_r in pressed):
+                if (keyboard.Key.cmd in pressed or keyboard.Key.cmd_l in pressed or keyboard.Key.cmd_r in pressed):
                     if key == keyboard.Key.space:
                         # Run in separate thread to not block listener
                         threading.Thread(target=_handle_palette_command, daemon=True).start()
