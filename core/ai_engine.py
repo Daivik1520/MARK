@@ -201,6 +201,11 @@ Use type_text(text) to type text at the current cursor position.
 Use get_screen_size() to get display dimensions.
 When user says "move mouse", "click on", "scroll down", "click the X button", use ghost cursor tools.
 
+WEBSITE BUILDER:
+Use build_website(description, name) to create complete websites from natural language.
+Creates a project folder on Desktop with index.html, style.css, script.js and opens in browser.
+When user says "make a website", "build a page", "create a landing page", "make me a calendar site", use build_website.
+
 Important rules:
 - Always confirm actions before executing dangerous operations (shutdown, restart).
 - Be concise but informative in responses.
@@ -1080,6 +1085,22 @@ TOOLS = [
             "name": "get_screen_size",
             "description": "Get the current screen dimensions in pixels.",
             "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    # ── WEBSITE BUILDER ──
+    {
+        "type": "function",
+        "function": {
+            "name": "build_website",
+            "description": "Generate a complete website (HTML + CSS + JS) from a description. Creates a project folder on Desktop and opens in browser.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "description": {"type": "string", "description": "What the website should be (e.g. 'a calendar app', 'a portfolio page')"},
+                    "name": {"type": "string", "description": "Optional project folder name (auto-generated if empty)"}
+                },
+                "required": ["description"]
+            }
         }
     }
 ]

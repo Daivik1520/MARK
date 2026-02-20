@@ -138,6 +138,9 @@ FAST_ROUTES = [
     (re.compile(r'click\s+(?:at\s+)?(\d+)\s+(\d+)', re.I), "click_at", lambda m: {"x": m.group(1), "y": m.group(2)}),
     (re.compile(r'scroll\s+(up|down|left|right)(?:\s+(\d+))?', re.I), "scroll_screen", lambda m: {"direction": m.group(1), "amount": m.group(2) or "3"}),
     (re.compile(r'(?:get\s+)?screen\s+size', re.I), "get_screen_size", lambda m: {}),
+
+    # ── Website Builder ──
+    (re.compile(r'(?:make|build|create|generate)\s+(?:me\s+)?(?:a\s+)?(.+?)\s+(?:website|site|page|webpage)', re.I), "build_website", lambda m: {"description": m.group(1).strip() + " website"}),
 ]
 
 # Commands that should NOT be fast-routed (need AI reasoning)

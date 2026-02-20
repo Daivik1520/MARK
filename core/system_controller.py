@@ -38,6 +38,7 @@ from agents.browser_copilot import browser_do
 from agents.universal_search import search_content
 from agents.data_extractor import scrape_data
 from tools.ghost_cursor import move_mouse, click_at, click_text, scroll_screen, type_text, drag_to, get_screen_size
+from agents.website_builder import build_website
 
 
 def _run_applescript(script: str) -> str:
@@ -603,6 +604,8 @@ TOOL_MAP = {
     "type_text": type_text,
     "drag_to": drag_to,
     "get_screen_size": get_screen_size,
+    # Website Builder
+    "build_website": build_website,
 }
 
 # Free models often send wrong param names. Map common variants to correct ones.
@@ -674,6 +677,8 @@ ARGUMENT_ALIASES = {
     "type_text": {"write": "text", "input": "text", "string": "text"},
     "drag_to": {},
     "get_screen_size": {},
+    "build_website": {"desc": "description", "prompt": "description", "what": "description", "type": "description",
+                      "project": "name", "folder": "name", "title": "name"},
 }
 
 
