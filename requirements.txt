@@ -13,7 +13,4 @@ python-socketio
 beautifulsoup4
 lxml
 pynput
-sounddevice
-numpy
 rumps
-openai-whisper
