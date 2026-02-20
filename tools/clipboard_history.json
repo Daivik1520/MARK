@@ -18,5 +18,60 @@
     "content": "Aura Window Management: Advanced voice-controlled snapping. \"Tile Safari and VS Code side-by-side\" or \"Focus my terminal and dim everything else.\"",
     "time": "2026-02-19 22:15:37",
     "type": "text"
+  },
+  {
+    "content": "set brightness to 50%",
+    "time": "2026-02-19 22:19:16",
+    "type": "text"
+  },
+  {
+    "content": "set brightness to 50%",
+    "time": "2026-02-19 22:20:55",
+    "type": "text"
+  },
+  {
+    "content": "https://github.com/Daivik1520/mark-system-activate.git",
+    "time": "2026-02-20 11:53:48",
+    "type": "url"
+  },
+  {
+    "content": "Bebas Neue",
+    "time": "2026-02-20 11:58:18",
+    "type": "text"
+  },
+  {
+    "content": "now list more feature to add",
+    "time": "2026-02-20 12:05:17",
+    "type": "text"
+  },
+  {
+    "content": "Automated Data Extraction\nTake the Browser Copilot one step further by adding scraping capabilities.\n\nHow it works: Uses Beautiful Soup + Playwright to extract structured data.\nCommands: \"Go to Amazon, search for laptops under $1000, and save the top 10 results to a CSV on my desktop.\"",
+    "time": "2026-02-20 12:18:39",
+    "type": "text"
+  },
+  {
+    "content": "Ghost Cursor (Precision OS Control)\nHow it works: We divide your screen into a grid numerically (like a grid overlay). We use PyAutoGUI to give MARK absolute control over your physical mouse cursor.\nCommands: \"MARK, move mouse to the top right and click the volume icon.\" or \"Scroll down fast.\"",
+    "time": "2026-02-20 12:19:16",
+    "type": "text"
+  },
+  {
+    "content": "Instant Local Dictation (Lightning Fast)\nHow it works: We integrate a tiny Whisper.cpp model entirely locally. When you hold a specific key combination (e.g., Command+Space), MARK instantly types whatever you say directly into whatever app you have open, much faster and more accurately than macOS's built-in dictation.",
+    "time": "2026-02-20 12:19:55",
+    "type": "text"
+  },
+  {
+    "content": "Spotlight-Style Floating Command Palette\n\nWhat it is: You never have to open the MARK browser tab again. Hitting a hotkey (like Option + Space) summons a glassmorphic, floating search bar directly in the center of your Mac screen (built using PyQt6 or similar overlay tech).\nWhy it\u2019s cool: Type a command silently and hit Enter. The bar vanishes instantly, and MARK executes the task in the background.",
+    "time": "2026-02-20 12:20:17",
+    "type": "text"
+  },
+  {
+    "content": "FastAPI / Asyncio Architecture Rewrite\n\nWhat it is: We upgrade the core server from Flask (synchronous) to FastAPI (fully asynchronous).\nWhy it\u2019s fast: Currently, if MARK is running a massive Universal Search, other background tasks might bottleneck. With asyncio, MARK can run web research, file searching, UI updates, and TTS audio generation concurrently at the exact same time without blocking.",
+    "time": "2026-02-20 12:20:53",
+    "type": "text"
+  },
+  {
+    "content": "go with these and make this perfect and rememebr this is not for any demo it shiuld be production ready and ececptionally fast and clean and well structured. now build them complytly and correctly and they should work really.",
+    "time": "2026-02-20 12:21:42",
+    "type": "text"
   }
 ]

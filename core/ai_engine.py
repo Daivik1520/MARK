@@ -186,6 +186,21 @@ Use search_content(query, directories) to find files by CONTENT, not filename.
 Searches text files in ~/Documents, ~/Desktop, ~/Downloads using TF-IDF ranking.
 When user says "find the document about", "search my files for", "where did I save that thing about", use search_content.
 
+DATA EXTRACTION (Web Scraping):
+Use scrape_data(task, output_format, max_items) to extract structured data from websites.
+Navigates to the site, extracts repeating data (product listings, tables, search results), saves as CSV or JSON to Desktop.
+output_format: "csv" or "json". max_items: number of items (default 20).
+When user says "scrape", "extract data from", "save top 10 results", "download a list of", use scrape_data.
+
+GHOST CURSOR (Precision OS Control):
+Use move_mouse(x, y) to move the mouse cursor to pixel coordinates.
+Use click_at(x, y, button) to click at coordinates (button: "left", "right", "double").
+Use click_text(text) to find text on screen using OCR and click it. Great for clicking buttons!
+Use scroll_screen(direction, amount) to scroll (direction: up/down/left/right, amount: 1-20).
+Use type_text(text) to type text at the current cursor position.
+Use get_screen_size() to get display dimensions.
+When user says "move mouse", "click on", "scroll down", "click the X button", use ghost cursor tools.
+
 Important rules:
 - Always confirm actions before executing dangerous operations (shutdown, restart).
 - Be concise but informative in responses.
@@ -965,6 +980,106 @@ TOOLS = [
                 },
                 "required": ["query"]
             }
+        }
+    },
+    # ── DATA EXTRACTOR ──
+    {
+        "type": "function",
+        "function": {
+            "name": "scrape_data",
+            "description": "Scrape structured data from a website. Navigates to the site, extracts repeating items (products, search results, tables), and saves as CSV or JSON to Desktop.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string", "description": "What to scrape (e.g. 'Go to Amazon and search for laptops under $1000')"},
+                    "output_format": {"type": "string", "description": "'csv' or 'json' (default: csv)"},
+                    "max_items": {"type": "string", "description": "Maximum items to extract (default: 20)"}
+                },
+                "required": ["task"]
+            }
+        }
+    },
+    # ── GHOST CURSOR ──
+    {
+        "type": "function",
+        "function": {
+            "name": "move_mouse",
+            "description": "Move the mouse cursor to specific pixel coordinates on screen.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x": {"type": "string", "description": "X coordinate (pixels from left)"},
+                    "y": {"type": "string", "description": "Y coordinate (pixels from top)"}
+                },
+                "required": ["x", "y"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "click_at",
+            "description": "Click at specific pixel coordinates.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x": {"type": "string", "description": "X coordinate"},
+                    "y": {"type": "string", "description": "Y coordinate"},
+                    "button": {"type": "string", "description": "'left', 'right', or 'double' (default: left)"}
+                },
+                "required": ["x", "y"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "click_text",
+            "description": "Find text on screen using OCR and click on it. Use when user says 'click the Submit button' or 'click on Settings'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Text to find and click (e.g. 'Submit', 'Settings', 'Export')"}
+                },
+                "required": ["text"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "scroll_screen",
+            "description": "Scroll the screen up, down, left, or right.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "direction": {"type": "string", "description": "'up', 'down', 'left', 'right'"},
+                    "amount": {"type": "string", "description": "Number of scroll steps 1-20 (default: 3)"}
+                },
+                "required": ["direction"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "type_text",
+            "description": "Type text at the current cursor position in whatever app is active.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Text to type"}
+                },
+                "required": ["text"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_screen_size",
+            "description": "Get the current screen dimensions in pixels.",
+            "parameters": {"type": "object", "properties": {}, "required": []}
         }
     }
 ]

@@ -132,6 +132,12 @@ FAST_ROUTES = [
 
     # ── Open Folder ──
     (re.compile(r'open\s+(?:the\s+)?folder\s+(.+)', re.I), "open_folder", _folder_args),
+
+    # ── Ghost Cursor ──
+    (re.compile(r'move\s+(?:the\s+)?mouse\s+(?:to\s+)?(\d+)\s+(\d+)', re.I), "move_mouse", lambda m: {"x": m.group(1), "y": m.group(2)}),
+    (re.compile(r'click\s+(?:at\s+)?(\d+)\s+(\d+)', re.I), "click_at", lambda m: {"x": m.group(1), "y": m.group(2)}),
+    (re.compile(r'scroll\s+(up|down|left|right)(?:\s+(\d+))?', re.I), "scroll_screen", lambda m: {"direction": m.group(1), "amount": m.group(2) or "3"}),
+    (re.compile(r'(?:get\s+)?screen\s+size', re.I), "get_screen_size", lambda m: {}),
 ]
 
 # Commands that should NOT be fast-routed (need AI reasoning)

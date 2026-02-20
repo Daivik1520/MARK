@@ -36,6 +36,8 @@ from tools.image_tools import edit_image
 from services.focus_bubble import start_focus, stop_focus
 from agents.browser_copilot import browser_do
 from agents.universal_search import search_content
+from agents.data_extractor import scrape_data
+from tools.ghost_cursor import move_mouse, click_at, click_text, scroll_screen, type_text, drag_to, get_screen_size
 
 
 def _run_applescript(script: str) -> str:
@@ -423,18 +425,36 @@ def unmute_volume() -> str:
 def set_brightness(level) -> str:
     """Set screen brightness (0-100 percent)."""
     try:
+        import ctypes
+        import ctypes.util
+
         level = int(float(level))
         level = max(0, min(100, level))
-        fraction = round(level / 100.0, 2)
-        # Try the 'brightness' CLI tool first (brew install brightness)
-        result = _run_shell(f'brightness {fraction} 2>/dev/null')
-        if 'not found' in result.lower() or 'error' in result.lower():
-            # Fallback: use AppleScript with keyboard brightness keys
-            # This uses System Events to simulate brightness adjustment
-            steps = int(level / 6.25)  # 16 steps total on Mac
-            _run_shell('osascript -e \'tell application "System Events" to key code 145\' ' * 16)  # Min brightness
-            for _ in range(steps):
-                _run_shell('osascript -e \'tell application "System Events" to key code 144\'')  # Increase
+        fraction = level / 100.0
+
+        # Use macOS DisplayServices private framework (works on Apple Silicon & Intel)
+        CoreGraphics = ctypes.CDLL(ctypes.util.find_library('CoreGraphics'))
+        DisplayServices = ctypes.CDLL(
+            '/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices'
+        )
+
+        # Get main display ID
+        CGMainDisplayID = CoreGraphics.CGMainDisplayID
+        CGMainDisplayID.restype = ctypes.c_uint32
+        display_id = CGMainDisplayID()
+
+        # Set brightness via DisplayServices
+        DisplayServicesSetBrightness = DisplayServices.DisplayServicesSetBrightness
+        DisplayServicesSetBrightness.argtypes = [ctypes.c_uint32, ctypes.c_float]
+        DisplayServicesSetBrightness.restype = ctypes.c_int
+
+        err = DisplayServicesSetBrightness(display_id, ctypes.c_float(fraction))
+        if err != 0:
+            # Fallback: try the 'brightness' CLI tool (brew install brightness)
+            result = _run_shell(f'brightness {fraction:.2f} 2>/dev/null')
+            if 'not found' in result.lower() or 'error' in result.lower():
+                return f"Brightness control failed (error code {err}). Try: brew install brightness"
+
         return f"Brightness set to {level}%, sir."
     except Exception as e:
         return f"Brightness control error: {str(e)}"
@@ -573,6 +593,16 @@ TOOL_MAP = {
     "browser_do": browser_do,
     # Universal Search
     "search_content": search_content,
+    # Data Extractor
+    "scrape_data": scrape_data,
+    # Ghost Cursor
+    "move_mouse": move_mouse,
+    "click_at": click_at,
+    "click_text": click_text,
+    "scroll_screen": scroll_screen,
+    "type_text": type_text,
+    "drag_to": drag_to,
+    "get_screen_size": get_screen_size,
 }
 
 # Free models often send wrong param names. Map common variants to correct ones.
@@ -634,6 +664,16 @@ ARGUMENT_ALIASES = {
     "browser_do": {"action": "task", "command": "task", "do": "task", "request": "task", "instructions": "task"},
     "search_content": {"search": "query", "find": "query", "look_for": "query", "text": "query",
                         "dirs": "directories", "folders": "directories", "paths": "directories", "in": "directories"},
+    "scrape_data": {"url": "task", "scrape": "task", "extract": "task", "from": "task",
+                    "format": "output_format", "type": "output_format",
+                    "limit": "max_items", "count": "max_items", "top": "max_items"},
+    "move_mouse": {},
+    "click_at": {"click": "button"},
+    "click_text": {"find": "text", "label": "text", "button": "text"},
+    "scroll_screen": {"dir": "direction", "steps": "amount", "lines": "amount"},
+    "type_text": {"write": "text", "input": "text", "string": "text"},
+    "drag_to": {},
+    "get_screen_size": {},
 }
 
 

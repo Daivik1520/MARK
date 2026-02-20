@@ -1,86 +1,109 @@
 """
-MARK — Main Application Server
-Flask-SocketIO server powering the MARK AI System Controller.
+MARK — Main Application Server (FastAPI + Async SocketIO)
+Fully asynchronous server powering the MARK AI System Controller.
+Uses uvicorn + python-socketio for zero-blocking concurrency.
 """
 
 import os
 import time
-import threading
-from flask import Flask, render_template, send_from_directory, request, jsonify
-from werkzeug.utils import secure_filename
-from flask_socketio import SocketIO, emit
+import asyncio
+import socketio
+import uvicorn
+from fastapi import FastAPI, UploadFile, File, Request
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, JSONResponse
 from dotenv import load_dotenv
 
 from core.ai_engine import get_ai_response, reset_conversation, get_system_prompt, set_system_prompt
 from core.tts_engine import text_to_speech_base64
 from core.fast_router import try_fast_route
+from core.system_controller import set_brightness, TOOL_MAP
 from tools.reminder_manager import start_scheduler as start_reminder_scheduler
 from tools.clipboard_manager import start_clipboard_monitor
 from services.gesture_controller import execute_gesture
 from services.proactive_monitor import start_proactive_monitor
-from core.system_controller import set_brightness, TOOL_MAP
 from services.focus_bubble import set_socketio as focus_set_socketio
 
 load_dotenv()
 
-app = Flask(__name__, static_folder="static", template_folder="static")
-app.config["SECRET_KEY"] = os.urandom(24).hex()
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+# ─────────────────────────────────────────────
+# FASTAPI + ASYNC SOCKETIO SETUP
+# ─────────────────────────────────────────────
+
+app = FastAPI(title="MARK AI System Controller")
+sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
+socket_app = socketio.ASGIApp(sio, other_app=app)
 
 
 # ─────────────────────────────────────────────
-# ROUTES
+# REST ROUTES
 # ─────────────────────────────────────────────
 
-@app.route("/")
-def index():
-    return send_from_directory("static", "index.html")
+@app.get("/")
+async def index():
+    return FileResponse("static/index.html")
 
 
-@app.route("/upload_3d", methods=["POST"])
-def upload_3d():
-    if "file" not in request.files:
-        return jsonify({"error": "No file"}), 400
-    f = request.files["file"]
-    if f.filename == "":
-        return jsonify({"error": "No file selected"}), 400
+@app.post("/upload_3d")
+async def upload_3d(file: UploadFile = File(...)):
+    if not file.filename:
+        return JSONResponse({"error": "No file selected"}, status_code=400)
     os.makedirs("static/uploads", exist_ok=True)
-    safe = secure_filename(f.filename)
-    f.save(os.path.join("static/uploads", safe))
-    return jsonify({"url": f"/static/uploads/{safe}", "name": safe})
+    safe = file.filename.replace("/", "_").replace("\\", "_")
+    path = os.path.join("static/uploads", safe)
+    content = await file.read()
+    with open(path, "wb") as f:
+        f.write(content)
+    return {"url": f"/static/uploads/{safe}", "name": safe}
+
+
+@app.post("/api/command")
+async def api_command(request: Request):
+    """REST endpoint for the Floating Command Palette and external integrations."""
+    data = await request.json()
+    command = data.get("command", "").strip()
+    if not command:
+        return JSONResponse({"error": "No command"}, status_code=400)
+
+    # Fast path first
+    fast = try_fast_route(command)
+    if fast:
+        return {"response": fast["text"], "fast": True}
+
+    # Slow path: AI
+    result = await asyncio.to_thread(get_ai_response, command)
+    return {"response": result["text"], "tool_calls": result.get("tool_calls"), "fast": False}
 
 
 # ─────────────────────────────────────────────
-# WEBSOCKET EVENTS
+# SOCKETIO EVENTS
 # ─────────────────────────────────────────────
 
-@socketio.on("connect")
-def handle_connect():
+@sio.on("connect")
+async def handle_connect(sid, environ):
     print("🔌 Client connected")
-    emit("status", {"message": "Connected to MARK", "type": "success"})
+    await sio.emit("status", {"message": "Connected to MARK", "type": "success"}, to=sid)
 
 
-@socketio.on("disconnect")
-def handle_disconnect():
+@sio.on("disconnect")
+async def handle_disconnect(sid):
     print("🔌 Client disconnected")
 
 
-@socketio.on("user_message")
-def handle_message(data):
-    """Handle user text/voice message."""
+@sio.on("user_message")
+async def handle_message(sid, data):
+    """Handle user text/voice message — fully async."""
     user_text = data.get("message", "").strip()
     if not user_text:
         return
 
     print(f"👤 User: {user_text}")
-
-    # Send thinking indicator
-    emit("thinking", {"status": True})
+    await sio.emit("thinking", {"status": True}, to=sid)
 
     try:
         start = time.time()
 
-        # ⚡ FAST PATH: Try local regex matching first (instant, no AI)
+        # ⚡ FAST PATH: instant local regex match (no AI, no network)
         fast_result = try_fast_route(user_text)
         if fast_result:
             elapsed = round(time.time() - start, 4)
@@ -88,138 +111,117 @@ def handle_message(data):
             tool_calls = fast_result.get("tool_calls")
             print(f"⚡ FAST: {ai_text[:80]} ({elapsed}s)")
 
-            emit("ai_response", {
+            await sio.emit("ai_response", {
                 "text": ai_text,
                 "tool_calls": tool_calls,
-                "response_time": elapsed
-            })
+                "response_time": elapsed,
+            }, to=sid)
 
-            # TTS in background
-            def generate_and_send_audio_fast():
-                audio_b64 = text_to_speech_base64(ai_text)
-                if audio_b64:
-                    socketio.emit("tts_audio", {"audio": audio_b64})
-            threading.Thread(target=generate_and_send_audio_fast, daemon=True).start()
-
-            emit("thinking", {"status": False})
+            # TTS in background (non-blocking)
+            asyncio.create_task(_send_tts(ai_text))
+            await sio.emit("thinking", {"status": False}, to=sid)
             return
 
-        # SLOW PATH: Full AI processing (for complex/conversational queries)
-        result = get_ai_response(user_text)
+        # SLOW PATH: Full AI processing in thread pool (non-blocking)
+        result = await asyncio.to_thread(get_ai_response, user_text)
         elapsed = round(time.time() - start, 2)
 
         ai_text = result["text"]
         tool_calls = result.get("tool_calls")
-
         print(f"🤖 MARK: {ai_text} ({elapsed}s)")
 
-        # Send the text response
-        emit("ai_response", {
+        await sio.emit("ai_response", {
             "text": ai_text,
             "tool_calls": tool_calls,
-            "response_time": elapsed
-        })
+            "response_time": elapsed,
+        }, to=sid)
 
-        # Generate TTS audio in background and send it
-        def generate_and_send_audio():
-            audio_b64 = text_to_speech_base64(ai_text)
-            if audio_b64:
-                socketio.emit("tts_audio", {"audio": audio_b64})
-
-        threading.Thread(target=generate_and_send_audio, daemon=True).start()
+        # TTS in background
+        asyncio.create_task(_send_tts(ai_text))
 
     except Exception as e:
         error_msg = f"Error processing request: {str(e)}"
         print(f"❌ {error_msg}")
-        emit("ai_response", {"text": error_msg, "tool_calls": None})
+        await sio.emit("ai_response", {"text": error_msg, "tool_calls": None}, to=sid)
 
     finally:
-        emit("thinking", {"status": False})
+        await sio.emit("thinking", {"status": False}, to=sid)
 
 
-@socketio.on("reset_chat")
-def handle_reset():
-    """Reset conversation history."""
-    reset_conversation()
-    emit("status", {"message": "Conversation reset", "type": "info"})
-
-
-@socketio.on("clap_activate")
-def handle_clap_activate():
-    """Handle clap activation — generate TTS for the activation phrase."""
-    print("👏👏 Clap activation triggered!")
-    activation_text = "Activating all services. M.A.R.K. activated."
-
-    def generate_activation_audio():
-        audio_b64 = text_to_speech_base64(activation_text)
+async def _send_tts(text):
+    """Generate TTS audio in background and broadcast."""
+    try:
+        audio_b64 = await asyncio.to_thread(text_to_speech_base64, text)
         if audio_b64:
-            socketio.emit("clap_activation_tts", {"audio": audio_b64})
-
-    threading.Thread(target=generate_activation_audio, daemon=True).start()
-
-
-@socketio.on("get_system_prompt")
-def handle_get_prompt():
-    """Send the current system prompt to the client."""
-    emit("system_prompt", {"prompt": get_system_prompt()})
+            await sio.emit("tts_audio", {"audio": audio_b64})
+    except Exception as e:
+        print(f"  TTS error: {e}")
 
 
-@socketio.on("set_system_prompt")
-def handle_set_prompt(data):
-    """Update the system prompt."""
+@sio.on("reset_chat")
+async def handle_reset(sid):
+    reset_conversation()
+    await sio.emit("status", {"message": "Conversation reset", "type": "info"}, to=sid)
+
+
+@sio.on("clap_activate")
+async def handle_clap_activate(sid):
+    print("👏👏 Clap activation triggered!")
+    asyncio.create_task(_send_tts("Activating all services. M.A.R.K. activated."))
+
+
+@sio.on("get_system_prompt")
+async def handle_get_prompt(sid):
+    await sio.emit("system_prompt", {"prompt": get_system_prompt()}, to=sid)
+
+
+@sio.on("set_system_prompt")
+async def handle_set_prompt(sid, data):
     new_prompt = data.get("prompt", "").strip()
     if new_prompt:
         set_system_prompt(new_prompt)
         print("✏️  System prompt updated")
-        emit("status", {"message": "System prompt saved", "type": "success"})
+        await sio.emit("status", {"message": "System prompt saved", "type": "success"}, to=sid)
     else:
-        emit("status", {"message": "Prompt cannot be empty", "type": "error"})
+        await sio.emit("status", {"message": "Prompt cannot be empty", "type": "error"}, to=sid)
 
 
-@socketio.on("gesture")
-def handle_gesture(data):
-    """Handle gesture events from the frontend."""
+@sio.on("gesture")
+async def handle_gesture(sid, data):
     gesture_type = data.get("type", "")
     if gesture_type:
-        result = execute_gesture(gesture_type)
+        result = await asyncio.to_thread(execute_gesture, gesture_type)
         print(f"🖐️ Gesture: {gesture_type} → {result}")
 
 
-@socketio.on("presence")
-def handle_presence(data):
-    """Handle presence detection events from the frontend webcam."""
+@sio.on("presence")
+async def handle_presence(sid, data):
     present = data.get("present", True)
     if not present:
-        # User walked away — dim screen
         print("👤 Presence: user away — dimming screen")
         try:
-            set_brightness("20")
+            await asyncio.to_thread(set_brightness, "20")
         except Exception:
             pass
-        emit("proactive_alert", {
+        await sio.emit("proactive_alert", {
             "message": "Screen dimmed — welcome back when you return, sir.",
-            "severity": "info"
-        })
+            "severity": "info",
+        }, to=sid)
     else:
-        # User returned — restore brightness & greet
         print("👤 Presence: user returned — restoring screen")
         try:
-            set_brightness("80")
+            await asyncio.to_thread(set_brightness, "80")
         except Exception:
             pass
-        # Send welcome-back TTS
-        def _greet():
-            audio_b64 = text_to_speech_base64("Welcome back, sir.")
-            if audio_b64:
-                socketio.emit("tts_audio", {"audio": audio_b64})
-        threading.Thread(target=_greet, daemon=True).start()
+        asyncio.create_task(_send_tts("Welcome back, sir."))
 
 
 # ─────────────────────────────────────────────
 # STARTUP
 # ─────────────────────────────────────────────
 
-if __name__ == "__main__":
+@app.on_event("startup")
+async def startup():
     api_key = os.getenv("OPENROUTER_API_KEY", "")
     if not api_key or api_key == "your_openrouter_api_key_here":
         print("\n⚠️  WARNING: Set your OPENROUTER_API_KEY in .env file!")
@@ -228,32 +230,66 @@ if __name__ == "__main__":
     print("""
     ╔══════════════════════════════════════╗
     ║         M.A.R.K. SYSTEM              ║
-    ║    AI System Controller v1.0         ║
+    ║    AI System Controller v2.0         ║
     ║     http://localhost:5001            ║
+    ║     ⚡ FastAPI + Async SocketIO      ║
     ╚══════════════════════════════════════╝
     """)
 
-    # Start background services
-    start_reminder_scheduler(socketio)
-    start_clipboard_monitor()
-    start_proactive_monitor(socketio)
-    focus_set_socketio(socketio)
+    # Start background services in thread pool
+    loop = asyncio.get_event_loop()
 
-    # Register the HUD card tool (needs socketio instance)
+    # Reminder scheduler needs the sio instance wrapped for compatibility
+    class SioCompat:
+        """Thin wrapper so legacy services can call .emit() synchronously."""
+        def emit(self, event, data=None):
+            asyncio.run_coroutine_threadsafe(sio.emit(event, data), loop)
+
+    sio_compat = SioCompat()
+
+    await asyncio.to_thread(start_reminder_scheduler, sio_compat)
+    await asyncio.to_thread(start_clipboard_monitor)
+    await asyncio.to_thread(start_proactive_monitor, sio_compat)
+    focus_set_socketio(sio_compat)
+
+    # Register HUD card tool (needs sio instance)
     def show_hud_card(title="MARK HUD", content="", icon="🔮", duration=8):
-        """Emit a HUD card event to the frontend."""
         try:
             duration = int(duration)
         except (ValueError, TypeError):
             duration = 8
-        socketio.emit("hud_card", {
-            "title": title,
-            "content": content,
-            "icon": icon,
-            "duration": duration,
-        })
+        asyncio.run_coroutine_threadsafe(
+            sio.emit("hud_card", {"title": title, "content": content, "icon": icon, "duration": duration}),
+            loop,
+        )
         return f"HUD card displayed: {title}"
 
     TOOL_MAP["show_hud_card"] = show_hud_card
 
-    socketio.run(app, host="0.0.0.0", port=5001, debug=False, allow_unsafe_werkzeug=True)
+    # Start dictation service (if available)
+    try:
+        from services.dictation import start_dictation
+        await asyncio.to_thread(start_dictation, sio_compat)
+        print("🎙️  Dictation service started (Ctrl+Shift+Space)")
+    except ImportError:
+        print("⚠️  Dictation service not available (install openai-whisper)")
+    except Exception as e:
+        print(f"⚠️  Dictation service error: {e}")
+
+    # Start command palette (if available)
+    try:
+        from services.command_palette import start_palette
+        await asyncio.to_thread(start_palette)
+        print("🎯 Command Palette active (Option+Space or menubar icon)")
+    except ImportError:
+        print("⚠️  Command palette not available (install rumps)")
+    except Exception as e:
+        print(f"⚠️  Command palette error: {e}")
+
+
+# Mount static files AFTER routes so / route takes priority
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
+if __name__ == "__main__":
+    uvicorn.run(socket_app, host="0.0.0.0", port=5001, log_level="info")
