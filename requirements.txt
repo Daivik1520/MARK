@@ -16,3 +16,7 @@ pynput
 rumps
 phonenumbers
 python-multipart
+llama-cpp-python
+huggingface-hub
+mcp
+chromadb

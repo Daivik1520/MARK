@@ -12,7 +12,7 @@
     <link
         href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500&display=swap"
         rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="/static/css/style.css?v=2">
     <link rel="icon"
         href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%23FF6A00'/><text x='50%' y='55%' text-anchor='middle' dominant-baseline='central' font-size='16' font-weight='900' fill='%23000'>M</text></svg>">
 </head>
@@ -236,6 +236,51 @@
                     </div>
                 </div>
 
+                <!-- AI Backend -->
+                <div class="modal__section" id="backendSection">
+                    <h3 class="modal__section-label">🧠 AI Backend</h3>
+                    <p class="modal__section-desc">Switch between local Llama 3.1 8B (private, on-device) and Groq cloud
+                        (faster, tool calling).</p>
+
+                    <div class="backend-toggle-wrap">
+                        <button class="backend-btn active" id="btnBackendGroq" data-backend="groq">
+                            ☁️ Cloud (Groq)
+                        </button>
+                        <button class="backend-btn" id="btnBackendLocal" data-backend="local">
+                            💻 Local (Llama 3.1 8B)
+                        </button>
+                    </div>
+                    <div class="backend-status" id="backendStatus">
+                        <span class="backend-status__dot"></span>
+                        <span class="backend-status__text">Using Groq cloud</span>
+                    </div>
+                </div>
+
+                <!-- Voice & Language -->
+                <div class="modal__section" id="voiceSection">
+                    <h3 class="modal__section-label">🗣️ Voice &amp; Language</h3>
+                    <p class="modal__section-desc">Choose MARK's voice and language. Telugu, Hindi, English, Tamil and
+                        more.</p>
+
+                    <div class="voice-select-wrap">
+                        <label class="voice-label">Select Voice</label>
+                        <select id="voiceSelect" class="voice-select">
+                            <option value="">Loading voices…</option>
+                        </select>
+                    </div>
+
+                    <div class="voice-select-wrap" style="margin-top:12px">
+                        <label class="voice-label">Speech Speed
+                            <span id="rateLabel" style="float:right;color:var(--accent)">Normal</span>
+                        </label>
+                        <input type="range" id="rateSlider" class="rate-slider" min="-50" max="50" step="5" value="10">
+                    </div>
+
+                    <button class="btn-primary" id="btnSaveVoice" style="margin-top:14px">Apply Voice</button>
+                    <span id="voiceSaveStatus"
+                        style="font-size:12px;color:var(--accent);margin-left:10px;opacity:0"></span>
+                </div>
+
                 <!-- System Prompt -->
                 <div class="modal__section">
                     <h3 class="modal__section-label">System Prompt</h3>
@@ -254,7 +299,7 @@
         crossorigin="anonymous"></script>
     <script src="/static/js/gestures.js"></script>
     <script src="/static/js/presence_detector.js"></script>
-    <script src="/static/js/app.js"></script>
+    <script src="/static/js/app.js?v=2"></script>
     <!-- Three.js UMD (jsDelivr CDN for speed) -->
     <script src="https://cdn.jsdelivr.net/npm/three@0.152.2/build/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.152.2/examples/js/controls/OrbitControls.js"></script>

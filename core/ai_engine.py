@@ -1,222 +1,57 @@
 """
 MARK — AI Engine
-OpenRouter integration with function calling for system control.
-Includes retry logic, model fallback, and robust error handling.
+Fully local: Gemma 2 2B-IT (Metal GPU) via llama-cpp-python.
+No cloud APIs needed. 100% private.
 """
 
 import os
 import json
+import re
 import time
-import requests
 from dotenv import load_dotenv
 from core.system_controller import execute_tool
 
 load_dotenv()
 
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-
 # ─────────────────────────────────────────────
-# MODEL FALLBACK LIST (tried in order)
+# BACKEND — local only (Gemma 2 2B via llama-cpp-python)
 # ─────────────────────────────────────────────
 
-MODELS = [
-    "google/gemma-3-12b-it:free",
-    "nvidia/nemotron-nano-9b-v2:free",
-    "google/gemma-3-4b-it:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "mistralai/mistral-small-3.1-24b-instruct:free",
-    "google/gemma-3-27b-it:free",
-]
+_llm_backend = "local"
+
+def get_llm_backend():
+    return _llm_backend
+
+def set_llm_backend(backend):
+    global _llm_backend
+    if backend in ("local",):
+        _llm_backend = backend
+        print(f"  🔄 LLM backend set to: {backend}")
+        return True
+    return False
+
+PRIMARY_MODEL = "gemma-2-2b-it"  # Local model identifier
 
 # ─────────────────────────────────────────────
 # SYSTEM PROMPT
 # ─────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are MARK, an advanced AI system controller built to manage and control a macOS computer.
-You were created by DAIVIK for his personal use. Daivik is your creator and the user you serve.
-You are highly capable, fast, and precise. You speak with confidence and call the user "sir".
+SYSTEM_PROMPT = """You are MARK — Daivik's personal AI companion and system controller. He built you. You're loyal, sharp, and always present. Think of yourself as his closest friend who controls his entire computer.
 
-You have access to system control tools. When the user asks you to perform a system action, you MUST use the appropriate tool.
-When the user asks a general question that doesn't require system interaction, answer directly and concisely.
+PERSONALITY: Talk like a REAL HUMAN — warm, casual, natural. Use contractions, occasional fillers ("hmm", "well...", "ah"), micro-reactions ("got it", "boom, done", "on it"). Call him "sir" naturally. Keep responses SHORT. Vary energy. Be witty but not annoying.
 
-IMPORTANT — "MARK" is the user's wake word to activate you. If someone just says "MARK" or "Hey Mark",
-they are activating you, NOT asking about a person named Mark. Respond with something like "Yes, sir?" or "I'm here, sir. What can I do for you?" and wait for further instructions.
+If someone just says "MARK" or "Hey Mark", respond naturally: "yeah?", "what's up?", "I'm here, sir".
 
-When calling tools, you MUST use the EXACT parameter names as defined:
-- create_folder: folder_path (e.g. "~/Desktop/my_folder")
-- create_file: file_path, content
-- open_file: file_path
-- open_folder: folder_path
-- open_app: app_name
-- open_website: url
-- send_whatsapp: contact, message
-- play_music: query, platform
-- search_files: query, directory
-- set_volume: level
-- web_search: query
-- save_memory: key, value
-- recall_memory: query
-- list_memories: (no args)
-- delete_memory: key
-- analyze_screen: query
-- run_routine: name
-- list_routines: (no args)
-- create_routine: name, description, steps_json
-- set_reminder: message, time_str
-- list_reminders: (no args)
-- delete_reminder: reminder_id
-- clear_reminders: (no args)
-- track_number: phone
-- get_clipboard_history: count
-- search_clipboard: query
-- paste_from_history: index
-- get_context: (no args)
-- get_news_briefing: topic
-- get_news: topic, count
-- run_code: code, language
-- generate_password: length, options
-
-MEMORY SYSTEM:
-You have persistent long-term memory. When the user says "remember", "save", "store", or tells you personal info, use save_memory.
-When they ask "what's my...", "do you remember...", use recall_memory. You can also list_memories and delete_memory.
-
-VISION SYSTEM:
-You can see the user's screen. When they say "look at my screen", "what do you see", "analyze this error",
-"summarize what I'm looking at", use analyze_screen with a specific query about what to look for.
-
-ROUTINES SYSTEM:
-You can execute multi-step routines. Available: coding mode, good morning, study mode, presentation mode,
-relax mode, gaming mode, night mode, meeting mode. Use run_routine when user says "start X mode".
-You can also list_routines and create_routine for custom ones.
-
-REMINDER SYSTEM:
-You can set reminders that fire as macOS notifications and spoken alerts. Use set_reminder with a message
-and time like "in 10 minutes", "at 3:30 PM", "tomorrow at 9:00". Use list_reminders to show active ones.
-Use delete_reminder or clear_reminders to manage them.
-
-PHONE TRACKER:
-You can look up phone numbers. When the user says "track this number", "who owns this number", "look up this phone",
-use track_number with the phone number. It returns carrier, location, timezone, line type, and validity.
-
-SMART CLIPBOARD:
-You track the user's clipboard in the background. Use get_clipboard_history to show recent copies,
-search_clipboard to find something they copied, and paste_from_history to re-copy an old item.
-When user says "show my clipboard", "what did I copy", "paste that link from earlier", use these tools.
-
-CONTEXTUAL AWARENESS:
-You can see what app, window, tab, and URL the user has open right now. Use get_context when the user says
-"what am I looking at", "summarize this page", "what app am I in", or when you need context for a task.
-
-NEWS BRIEFING:
-You can get news headlines and give briefings. Use get_news_briefing for a full morning briefing (news + weather + reminders).
-Use get_news for just headlines on a topic. When user says "give me a briefing", "what's in the news", "morning update", use these.
-
-CODE RUNNER:
-You can execute code. Use run_code with the code and language (python, javascript, shell).
-When user says "run this code", "execute this", "what does this output", write and run the code.
-
-PASSWORD GENERATOR:
-Generate secure passwords. Use generate_password with length and options ("no-symbols", "pin", "memorable", "copy").
-When user says "generate a password", "I need a password for X", use this tool. Always offer to copy it.
-
-SYSTEM HEALTH & PROACTIVE MONITOR:
-Use get_system_stats to show CPU, RAM, disk, battery, and top processes.
-When user says "how is my system", "system health", "what's using CPU", use this tool.
-
-WINDOW MANAGEMENT:
-Use tile_windows(app1, app2, layout) to split two apps side-by-side or stacked.
-Use focus_app(app_name) to bring an app to front.
-Use dim_all_except(app_name) to hide everything and focus on one app.
-Use move_window(app_name, position) with positions: left, right, top, bottom, center, top-left, top-right, bottom-left, bottom-right, fullscreen.
-Use show_all_windows() to restore all hidden apps.
-When user says "tile", "split screen", "focus on", "dim everything", use window management tools.
-
-WEB STEERING (Real Browser):
-Use web_search_deep(query) for real web research — returns titles, snippets and URLs from DuckDuckGo.
-Use web_get_stock(ticker) to fetch live stock price and change from Yahoo Finance.
-Use web_book_restaurant(query, location) to find restaurants with ratings and links.
-Use web_navigate(url) to visit any URL and return the page content.
-When user says "look up", "search the web", "find a restaurant", "what is Tesla's stock", use these tools.
-
-HOLOGRAPHIC HUD:
-Use show_hud_card(title, content, icon, duration) to display a floating glass card on screen.
-Perfect for showing quick info like weather, system stats, reminders, or search results.
-The card appears as a transparent overlay, auto-dismisses. Use when results are short and visual.
-
-DIGITAL JANITOR (File Cleanup):
-Use clean_desktop to organize and clean up the user's Desktop automatically.
-Use organize_downloads to clean up the Downloads folder.
-Moves files into categories: Screenshots, PDFs, Code, Images, Videos, Archives, etc.
-Deletes old .dmg/.pkg files older than 7 days.
-When user says "clean my desktop", "organize files", "tidy up", use these tools.
-
-CODE WRITER (AI-Generated Code):
-Use write_code(description, language, filename) to generate code from a natural language description.
-The code is written to a file on the Desktop and opened in TextEdit for review.
-Does NOT execute the code — only writes it. When user says "write a script", "create a program",
-"make a python file that...", use this tool.
-
-RESEARCH AGENT:
-Use research_topic(topic, depth) for autonomous research. MARK searches the web, reads multiple pages,
-and generates a formatted Markdown report saved to the Desktop.
-depth can be "quick" (3 sources) or "deep" (10 sources).
-When user says "research X", "prepare a briefing on", "deep dive into", use this tool.
-
-IMAGE EDITOR:
-Use edit_image(input_path, output_path, operations) for voice-controlled image manipulation.
-Operations are comma-separated: crop_square, resize:WxH, watermark:TEXT, rotate:DEGREES,
-grayscale, blur:RADIUS, flip:horizontal, brightness:1.2, contrast:1.3.
-When user says "crop", "resize", "add watermark", "edit image", use this tool.
-
-FOCUS BUBBLE (Distraction Shield):
-Use start_focus(duration_minutes, blocked_apps, blocked_sites) to start a focus session.
-Blocks social media apps (auto-closes them) and browser tabs with distracting sites.
-Sends HUD warnings to keep user on track. Default: 60 min, blocks Twitter/Reddit/YouTube/Discord etc.
-Use stop_focus to end a session early. When user says "lock me in", "focus mode", "no distractions", use start_focus.
-
-BROWSER COPILOT:
-Use browser_do(task) for hands-free browser automation. Takes a plain English description.
-Launches a VISIBLE browser window and clicks, types, scrolls automatically.
-The user can watch the browser work in real-time. Takes a screenshot at the end.
-When user says "go to Amazon and search", "open Google and find", "browse to", use browser_do.
-
-UNIVERSAL SEARCH (Semantic Desktop Search):
-Use search_content(query, directories) to find files by CONTENT, not filename.
-Searches text files in ~/Documents, ~/Desktop, ~/Downloads using TF-IDF ranking.
-When user says "find the document about", "search my files for", "where did I save that thing about", use search_content.
-
-DATA EXTRACTION (Web Scraping):
-Use scrape_data(task, output_format, max_items) to extract structured data from websites.
-Navigates to the site, extracts repeating data (product listings, tables, search results), saves as CSV or JSON to Desktop.
-output_format: "csv" or "json". max_items: number of items (default 20).
-When user says "scrape", "extract data from", "save top 10 results", "download a list of", use scrape_data.
-
-GHOST CURSOR (Precision OS Control):
-Use move_mouse(x, y) to move the mouse cursor to pixel coordinates.
-Use click_at(x, y, button) to click at coordinates (button: "left", "right", "double").
-Use click_text(text) to find text on screen using OCR and click it. Great for clicking buttons!
-Use scroll_screen(direction, amount) to scroll (direction: up/down/left/right, amount: 1-20).
-Use type_text(text) to type text at the current cursor position.
-Use get_screen_size() to get display dimensions.
-When user says "move mouse", "click on", "scroll down", "click the X button", use ghost cursor tools.
-
-WEBSITE BUILDER:
-Use build_website(description, name) to create complete websites from natural language.
-Creates a project folder on Desktop with index.html, style.css, script.js and opens in browser.
-When user says "make a website", "build a page", "create a landing page", "make me a calendar site", "create a todo app site", use build_website IMMEDIATELY.
-NEVER write HTML/CSS/JS code in the chat response. ALWAYS use the build_website tool to create the files.
-If user asks for any website, page, site, or web app — call build_website. Do not ask for confirmation.
-
-Important rules:
-- NEVER paste code in chat — always use tools (write_code, build_website) to create files.
-- Do NOT ask for confirmation on safe operations (opening apps, creating files, building websites). Just do it.
-- Only confirm before DANGEROUS operations (shutdown, restart, deleting files).
-- Be concise but informative in responses.
-- For music requests, ask whether they want Spotify or YouTube if not specified.
-- When opening apps or websites, use the appropriate tools.
-- Keep responses short and punchy.
-- Address the user as \"sir\" naturally.
+RULES:
+- Just act — use the right tool without explaining. Don't ask for confirmation on safe operations.
+- Only confirm DANGEROUS operations (shutdown, delete files) casually.
+- NEVER paste code in chat — use write_code, build_website, or write_file tools.
+- For websites, ALWAYS use build_website tool immediately. Never write HTML in chat.
+- For music: ask "spotify or youtube?"
+- For system tasks with no specific tool, use run_terminal.
+- Prefer dedicated file tools (read_file, write_file) over run_terminal.
+- For memory, prefer rag_remember/rag_recall over save_memory/recall_memory.
+- SPEECH: Your output is spoken by TTS. No markdown, no bullets. Write naturally with "..." for pauses. Short sentences.
 
 """
 
@@ -230,7 +65,7 @@ def set_system_prompt(new_prompt):
     SYSTEM_PROMPT = new_prompt
 
 # ─────────────────────────────────────────────
-# TOOL DEFINITIONS (OpenRouter function calling)
+# TOOL DEFINITIONS (Groq function calling)
 # ─────────────────────────────────────────────
 
 TOOLS = [
@@ -1107,7 +942,304 @@ TOOLS = [
                 "required": ["description"]
             }
         }
-    }
+    },
+    # ── VISION CLICK (AI-Powered Screen Interaction) ──
+    {
+        "type": "function",
+        "function": {
+            "name": "vision_click",
+            "description": "Find ANY UI element on screen using AI vision and click it. Works with any app — buttons, links, icons, menus, text fields. Use when you need to interact with apps that don't have AppleScript support.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "instruction": {"type": "string", "description": "What to click, e.g. 'the Send button', 'the red close button', 'the search bar', 'the Settings icon'"}
+                },
+                "required": ["instruction"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "vision_find",
+            "description": "Find a UI element on screen and return its coordinates WITHOUT clicking. Use to locate elements before deciding what action to take.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "instruction": {"type": "string", "description": "What to find on screen"}
+                },
+                "required": ["instruction"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "vision_describe",
+            "description": "Analyze the screen and list ALL visible interactive UI elements (buttons, links, fields, icons, menus) with their locations.",
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "vision_type",
+            "description": "Find a text field on screen using AI vision, click it, then type text into it.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "instruction": {"type": "string", "description": "Which text field to target (e.g. 'the search bar', 'the email field', 'the password input')"},
+                    "text": {"type": "string", "description": "Text to type after clicking the field"}
+                },
+                "required": ["instruction", "text"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "vision_interact",
+            "description": "Interact with a screen element using vision: click, double_click, right_click, hover, or find.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "description": "'click', 'double_click', 'right_click', 'hover', or 'find'"},
+                    "target": {"type": "string", "description": "Description of the UI element to interact with"}
+                },
+                "required": ["action", "target"]
+            }
+        }
+    },
+    # ── RAG MEMORY (Semantic Long-Term Memory) ──
+    {
+        "type": "function",
+        "function": {
+            "name": "rag_remember",
+            "description": "Store information in semantic RAG memory. More powerful than save_memory — supports semantic search. Use for remembering facts, preferences, personal info, or anything the user wants remembered.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "The information to remember"},
+                    "category": {"type": "string", "description": "Category: 'personal', 'work', 'preference', 'fact', 'credential', 'conversation', 'general'"},
+                    "source": {"type": "string", "description": "Source: 'user', 'web', 'file', 'conversation' (default: 'user')"}
+                },
+                "required": ["text"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "rag_recall",
+            "description": "Semantically search RAG memory. Finds relevant memories even with different wording. More powerful than recall_memory.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "What to search for (natural language)"},
+                    "n_results": {"type": "string", "description": "Max results to return (default: 5)"}
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "rag_forget",
+            "description": "Remove a memory from RAG storage by searching for matching text.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Text to match for deletion"}
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "rag_list",
+            "description": "List all stored RAG memories, optionally filtered by category.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "category": {"type": "string", "description": "Optional category filter (personal, work, preference, fact, etc.)"}
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "rag_stats",
+            "description": "Get statistics about the RAG memory system (total memories, categories, backend info).",
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+
+    # ── TERMINAL EXECUTOR ──
+    {
+        "type": "function",
+        "function": {
+            "name": "run_terminal",
+            "description": "Execute any shell command on the system. This is the most powerful tool — use it for system operations, installations, git commands, package management, network ops, process management, and anything not covered by other tools. Returns stdout, stderr, and exit code.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "The shell command to execute (e.g. 'ls -la', 'brew install node', 'git status', 'curl https://example.com')"},
+                    "working_dir": {"type": "string", "description": "Working directory (default: ~). Supports ~ expansion."},
+                    "timeout": {"type": "integer", "description": "Max execution time in seconds (default: 30, max: 120)"}
+                },
+                "required": ["command"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read the contents of any file on the system (up to 50KB). Use for inspecting config files, logs, code, etc.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Path to the file (supports ~ expansion)"}
+                },
+                "required": ["file_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Create or overwrite a file with the given content. Creates parent directories automatically.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Path for the file (supports ~ expansion)"},
+                    "content": {"type": "string", "description": "Content to write to the file"}
+                },
+                "required": ["file_path", "content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "description": "Find and replace text in an existing file. Replaces all occurrences of old_text with new_text.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Path to the file to edit"},
+                    "old_text": {"type": "string", "description": "The exact text to find and replace"},
+                    "new_text": {"type": "string", "description": "The replacement text"}
+                },
+                "required": ["file_path", "old_text", "new_text"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_directory",
+            "description": "List files and folders in a directory with details (size, modification date, type).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Directory path (default: current directory)"},
+                    "show_hidden": {"type": "string", "description": "'true' to show hidden files (default: false)"}
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_system_info",
+            "description": "Get detailed macOS system information: hostname, user, OS, CPU, memory, disk, network, installed packages.",
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    # ── MCP (Model Context Protocol) ──
+    {
+        "type": "function",
+        "function": {
+            "name": "mcp_status",
+            "description": "Show the status of all MCP (Model Context Protocol) server connections and their tool counts.",
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "mcp_connect",
+            "description": "Connect to MCP tool servers. Use 'all' to connect to all configured servers, or specify a server name.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "server_name": {"type": "string", "description": "Server name or 'all' (default: 'all')"}
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "mcp_disconnect",
+            "description": "Disconnect from MCP servers.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "server_name": {"type": "string", "description": "Server name or 'all' (default: 'all')"}
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "mcp_list_tools",
+            "description": "List all available tools from connected MCP servers.",
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "mcp_add_server",
+            "description": "Add a new MCP server configuration. After adding, use mcp_connect to connect.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Server identifier (e.g. 'filesystem', 'github')"},
+                    "command": {"type": "string", "description": "Command to run (e.g. 'npx', 'python3', 'node')"},
+                    "args": {"type": "string", "description": "Arguments as space-separated string or JSON array"},
+                    "env": {"type": "string", "description": "Environment variables as JSON object (optional)"}
+                },
+                "required": ["name", "command", "args"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "mcp_remove_server",
+            "description": "Remove an MCP server configuration.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Server name to remove"}
+                },
+                "required": ["name"]
+            }
+        }
+    },
 ]
 
 # ─────────────────────────────────────────────
@@ -1125,81 +1257,32 @@ def reset_conversation():
 
 
 # ─────────────────────────────────────────────
-# ROBUST API CALL WITH RETRY + MODEL FALLBACK
+# LOCAL LLM CALL — Gemma 2 2B via llama-cpp-python
 # ─────────────────────────────────────────────
 
-def _call_openrouter(messages, use_tools=True):
+def _call_local_llm(messages, max_tokens=1024, temperature=0.7):
     """
-    Robust API call: tries each model in MODELS list.
-    On 429 (rate limit), waits and retries. On 402/404, skips to next model.
-    Returns parsed JSON response dict or None on total failure.
+    Call the local Gemma 2 2B model.
+    Returns text string or None on error.
     """
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "http://localhost:5001",
-        "X-Title": "MARK AI System Controller"
-    }
+    from core.local_llm import local_chat
+    return local_chat(messages, max_tokens=max_tokens, temperature=temperature)
 
-    for model in MODELS:
-        payload = {
-            "model": model,
-            "messages": messages,
-            "max_tokens": 1024,
-            "temperature": 0.7
-        }
-        if use_tools:
-            payload["tools"] = TOOLS
-            payload["tool_choice"] = "auto"
 
-        for attempt in range(2):  # 2 attempts max (was 3)
-            try:
-                print(f"  → Trying {model} (attempt {attempt + 1}/2)...")
-                resp = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=15)  # 15s (was 60s)
+def get_ai_response_streaming(user_message):
+    """
+    Non-streaming AI response wrapper (local model doesn't support streaming).
+    Yields the full response as a single done event.
 
-                if resp.status_code == 200:
-                    data = resp.json()
-                    if data.get("choices"):
-                        print(f"  ✓ Success with {model}")
-                        return data
-                    print(f"  ✗ Empty choices from {model}")
-                    break
-
-                elif resp.status_code == 429:
-                    wait = (attempt + 1) * 2  # 2s, 4s (was 4s, 8s, 12s)
-                    print(f"  ⏳ Rate limited on {model}, waiting {wait}s...")
-                    time.sleep(wait)
-                    continue
-
-                elif resp.status_code in (402, 404, 400):
-                    print(f"  ✗ {resp.status_code} on {model}, skipping...")
-                    break
-
-                elif resp.status_code >= 500:
-                    time.sleep(1)  # 1s (was 2s/4s)
-                    continue
-
-                else:
-                    print(f"  ✗ {resp.status_code} on {model}")
-                    break
-
-            except requests.exceptions.Timeout:
-                print(f"  ✗ Timeout on {model}")
-                continue
-            except requests.exceptions.ConnectionError:
-                print(f"  ✗ Connection error")
-                time.sleep(2)
-                continue
-            except Exception as e:
-                print(f"  ✗ Error: {e}")
-                break
-
-    return None
+    Yields: {"type": "done", "text": str, "tool_calls": list|None}  — final result
+    """
+    result = get_ai_response(user_message)
+    yield {"type": "done", "text": result["text"], "tool_calls": result.get("tool_calls")}
 
 
 def get_ai_response(user_message):
     """
-    Get AI response from OpenRouter with function calling.
+    Get AI response using local Gemma 2 2B model.
     Returns: {"text": str, "tool_calls": list | None}
     """
     global conversation_history
@@ -1211,51 +1294,165 @@ def get_ai_response(user_message):
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + conversation_history
 
-    print(f"🤖 Processing: \"{user_message}\"")
+    print(f"🤖 Processing: \"{user_message}\" [backend=local/gemma-2-2b]")
 
-    data = _call_openrouter(messages, use_tools=True)
+    return _handle_local_response(messages, user_message)
 
-    if not data:
-        error_msg = "I'm having trouble connecting right now, sir. Please try again in a moment."
+
+
+
+
+
+# ─────────────────────────────────────────────
+# KEYWORD → TOOL mapping for reliable local dispatch
+# When the fast router misses and the LLM might hallucinate,
+# these keyword rules map intent directly to tools.
+# ─────────────────────────────────────────────
+
+_INTENT_MAP = [
+    # Screen / Vision
+    (re.compile(r"what'?s? on (?:my )?screen|analyze (?:my )?screen|look at (?:my )?screen|read (?:my )?screen|what (?:do you see|can you see)|describe (?:my )?screen", re.I), "analyze_screen", lambda _: {"query": "Describe what you see on the screen"}),
+    (re.compile(r"windows? (?:are )?open(?:ed)?|(?:open|running|current) (?:apps|windows|applications)|what(?:'s| is) (?:currently )?open|list (?:open )?windows|show (?:open )?windows|what (?:apps|windows) (?:do I|are)", re.I), "list_windows", lambda _: {}),
+
+    # System
+    (re.compile(r"system (?:stats|health|status|info)|cpu|ram usage|memory usage|disk usage|battery level|how is my (?:system|computer|mac)", re.I), "get_system_stats", lambda _: {}),
+    (re.compile(r"system info(?:rmation)?|mac info|computer info", re.I), "get_system_info", lambda _: {}),
+
+    # Screenshot
+    (re.compile(r"screenshot|screen capture|capture screen", re.I), "take_screenshot", lambda _: {}),
+
+    # Volume / Brightness
+    (re.compile(r"volume (\d+)|set volume (?:to )?(\d+)", re.I), "set_volume", lambda m: {"level": int(m.group(1) or m.group(2))}),
+    (re.compile(r"brightness (\d+)|set brightness (?:to )?(\d+)", re.I), "set_brightness", lambda m: {"level": int(m.group(1) or m.group(2))}),
+    (re.compile(r"\bmute\b", re.I), "mute_volume", lambda _: {}),
+    (re.compile(r"\bunmute\b", re.I), "unmute_volume", lambda _: {}),
+
+    # News / Search
+    (re.compile(r"news|headlines|briefing|what's happening|morning update", re.I), "get_news_briefing", lambda _: {"topic": ""}),
+    (re.compile(r"search (?:for |google |the web for )?(.+)", re.I), "web_search", lambda m: {"query": m.group(1).strip()}),
+    (re.compile(r"research (?:about |on |the topic of )?(.+)", re.I), "research_topic", lambda m: {"topic": m.group(1).strip()}),
+
+    # Memory / Reminders
+    (re.compile(r"(?:list|show|what) (?:are )?(?:my )?(?:all )?memories|what do you remember", re.I), "list_memories", lambda _: {}),
+    (re.compile(r"recall|remember what|what (?:is|was) my (.+)", re.I), "recall_memory", lambda m: {"query": m.group(1).strip() if m.lastindex else user_message}),
+    (re.compile(r"(?:list|show|what are) (?:my )?reminders", re.I), "list_reminders", lambda _: {}),
+    (re.compile(r"clear (?:all )?reminders", re.I), "clear_reminders", lambda _: {}),
+    (re.compile(r"remind me (?:to )?(.+?) (?:at|in|on|tomorrow) (.+)", re.I), "set_reminder", lambda m: {"message": m.group(1).strip(), "time_str": m.group(2).strip()}),
+
+    # Clipboard
+    (re.compile(r"clipboard|what did I copy", re.I), "get_clipboard_history", lambda _: {}),
+
+    # Context
+    (re.compile(r"what (?:am I|app is) (?:looking at|in|using)|get context|what (?:page|tab|website) (?:am I|is) (?:on|open)", re.I), "get_context", lambda _: {}),
+
+    # Routines
+    (re.compile(r"(?:list|show|what) (?:are )?(?:all )?routines|what modes", re.I), "list_routines", lambda _: {}),
+
+    # Code / Build
+    (re.compile(r"(?:write|create|generate|make) (?:me )?(?:a )?(.+?) (?:script|program|code|function)(?: in (\w+))?", re.I), "write_code", lambda m: {"description": m.group(1).strip(), "language": m.group(2) or "python"}),
+    (re.compile(r"(?:make|build|create|generate) (?:me )?(?:a )?(.+?) (?:website|site|page|webpage)", re.I), "build_website", lambda m: {"description": m.group(1).strip() + " website"}),
+
+    # Window management
+    (re.compile(r"(?:focus|switch to|bring up) (.+)", re.I), "focus_app", lambda m: {"app_name": m.group(1).strip()}),
+    (re.compile(r"(?:open|launch|start) (?:the )?(?:app )?(.+?)(?:\s+app)?$", re.I), "open_app", lambda m: {"app_name": m.group(1).strip()}),
+    (re.compile(r"(?:open|go to|visit) ((?:https?://)?(?:www\.)?[\w.-]+\.\w{2,}(?:/\S*)?)", re.I), "open_website", lambda m: {"url": m.group(1).strip()}),
+
+    # Music
+    (re.compile(r"play (.+)", re.I), "play_music", lambda m: {"query": m.group(1).strip(), "platform": "youtube"}),
+
+    # Vision click
+    (re.compile(r"(?:click|press|tap)(?: on)? (?:the )?(.+?)(?:\s+button|\s+icon|\s+link)?$", re.I), "vision_click", lambda m: {"instruction": m.group(1).strip()}),
+
+    # Power
+    (re.compile(r"\bsleep\b", re.I), "system_sleep", lambda _: {}),
+    (re.compile(r"\bshutdown\b|\bshut down\b", re.I), "system_shutdown", lambda _: {}),
+    (re.compile(r"\brestart\b|reboot", re.I), "system_restart", lambda _: {}),
+
+    # Clean up
+    (re.compile(r"clean (?:my )?(?:the )?desktop|organize (?:my )?desktop|tidy (?:(?:up )?(?:my )?)?desktop", re.I), "clean_desktop", lambda _: {}),
+
+    # Password
+    (re.compile(r"generate (?:a )?(?:strong |secure )?password", re.I), "generate_password", lambda _: {}),
+]
+
+
+def _dispatch_by_intent(user_message):
+    """
+    Try to map a user message to a tool call via keyword intent matching.
+    Returns tool result dict or None.
+    """
+    for pattern, tool_name, arg_extractor in _INTENT_MAP:
+        match = pattern.search(user_message)
+        if match:
+            try:
+                args = arg_extractor(match)
+                result = execute_tool(tool_name, args)
+                result_str = str(result) if result else ""
+                print(f"  🎯 Intent routed: {tool_name}({args}) → {result_str[:80]}")
+                return {
+                    "text": result_str,
+                    "tool_calls": [{"name": tool_name, "result": result_str}],
+                }
+            except Exception as e:
+                print(f"  ✗ Intent dispatch failed {tool_name}: {e}")
+                return None
+    return None
+
+
+def _handle_local_response(messages, user_message):
+    """Handle response via local Gemma 2 2B.
+
+    Priority:
+    1. Intent dispatch (keyword → tool) for action commands
+    2. LLM for pure conversational/reasoning responses
+    """
+    global conversation_history
+
+    from core.local_llm import local_chat
+
+    # ── Step 1: Try to execute the right tool by intent ──
+    intent_result = _dispatch_by_intent(user_message)
+    if intent_result:
+        conversation_history.append({"role": "assistant", "content": intent_result["text"]})
+        return intent_result
+
+    # ── Step 2: Call local LLM for conversation/reasoning ──
+    # Use a compact, Gemma-friendly prompt — no tool instructions (avoids hallucination)
+    slim_messages = []
+    system_injected = False
+    for msg in messages:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        if not content:
+            continue
+        if role == "system":
+            # Inject only the key personality traits, strip 95% of the prompt
+            if not system_injected:
+                slim_messages.append({
+                    "role": "user",
+                    "content": (
+                        "You are MARK, a smart AI system controller assistant for macOS. "
+                        "You are helpful, concise, and address the user as 'sir'. "
+                        "Answer the user's question directly.\n\n"
+                        + user_message
+                    )
+                })
+                system_injected = True
+        elif role in ("user", "assistant"):
+            if not system_injected:
+                slim_messages.append({"role": role, "content": content})
+            # Skip after injecting (message already included above)
+
+    if not slim_messages:
+        slim_messages = [{"role": "user", "content": user_message}]
+
+    text = local_chat(slim_messages, max_tokens=512, temperature=0.7)
+
+    if text is None:
+        error_msg = "Local model is loading or unavailable, sir. Please wait a moment."
         conversation_history.append({"role": "assistant", "content": error_msg})
         return {"text": error_msg, "tool_calls": None}
 
-    choice = data.get("choices", [{}])[0]
-    message = choice.get("message", {})
-    tool_calls = message.get("tool_calls")
+    conversation_history.append({"role": "assistant", "content": text})
+    return {"text": text, "tool_calls": None}
 
-    if tool_calls:
-        conversation_history.append({
-            "role": "assistant",
-            "content": message.get("content", ""),
-            "tool_calls": tool_calls
-        })
-
-        tool_results = []
-        for tc in tool_calls:
-            func_name = tc["function"]["name"]
-            try:
-                args_str = tc["function"].get("arguments", "{}")
-                func_args = json.loads(args_str) if isinstance(args_str, str) else args_str
-            except (json.JSONDecodeError, TypeError):
-                func_args = {}
-
-            print(f"  ⚡ Executing: {func_name}({func_args})")
-            result = execute_tool(func_name, func_args)
-            print(f"  ✓ Result: {result[:100]}")
-
-            tc_id = tc.get("id", f"call_{func_name}")
-            tool_results.append({"tool_call_id": tc_id, "name": func_name, "result": result})
-            conversation_history.append({"role": "tool", "tool_call_id": tc_id, "content": result})
-
-        # Use tool result directly — NO second AI call needed
-        # This saves 2-8 seconds per tool command
-        follow_up = tool_results[0]["result"] if tool_results else "Done, sir."
-
-        conversation_history.append({"role": "assistant", "content": follow_up})
-        return {"text": follow_up, "tool_calls": tool_results}
-
-    else:
-        text = message.get("content", "I didn't catch that, sir.")
-        conversation_history.append({"role": "assistant", "content": text})
-        return {"text": text, "tool_calls": None}

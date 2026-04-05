@@ -1,26 +1,17 @@
 """
 MARK — Vision Engine (Screen Sense)
-Captures screenshots and analyzes them using OpenRouter vision models.
-Enables MARK to "see" what's on the user's screen.
+Captures screenshots and analyzes them.
+Note: Vision analysis requires a multimodal model. With Gemma 2 2B (text-only),
+vision features are limited to OCR-based analysis via pytesseract if available.
 """
 
 import os
 import base64
 import time
-import requests
+import subprocess
 from dotenv import load_dotenv
 
 load_dotenv()
-
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-
-# Vision-capable models (ordered by preference)
-VISION_MODELS = [
-    "google/gemini-2.0-flash-001",
-    "google/gemini-flash-1.5",
-    "meta-llama/llama-4-maverick:free",
-]
 
 SCREENSHOT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "screenshots")
 
@@ -40,7 +31,6 @@ def capture_screenshot() -> str:
     filepath = os.path.join(SCREENSHOT_DIR, f"screen_{timestamp}.png")
 
     try:
-        import subprocess
         result = subprocess.run(
             ["screencapture", "-x", "-C", filepath],
             capture_output=True, text=True, timeout=10
@@ -53,16 +43,10 @@ def capture_screenshot() -> str:
         return ""
 
 
-def _encode_image(filepath: str) -> str:
-    """Read an image file and return base64-encoded string."""
-    with open(filepath, "rb") as f:
-        return base64.b64encode(f.read()).decode("utf-8")
-
-
 def analyze_screen(query: str = "Describe what you see on the screen") -> str:
     """
-    Take a screenshot and analyze it using a vision model.
-    The query allows the user to ask specific questions about the screen content.
+    Take a screenshot and analyze it.
+    Uses OCR (pytesseract) to extract text, then local Gemma to interpret.
     """
     print(f"  👁️ Vision: Capturing screenshot...")
     screenshot_path = capture_screenshot()
@@ -70,93 +54,65 @@ def analyze_screen(query: str = "Describe what you see on the screen") -> str:
     if not screenshot_path or not os.path.exists(screenshot_path):
         return "I wasn't able to capture the screen, sir. Please check screen recording permissions in System Settings > Privacy & Security."
 
-    print(f"  👁️ Vision: Analyzing with AI...")
-    image_b64 = _encode_image(screenshot_path)
+    print(f"  👁️ Vision: Analyzing screen content...")
 
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "http://localhost:5001",
-        "X-Title": "MARK AI Vision"
-    }
-
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are MARK's vision system. You analyze screenshots from a macOS computer. "
-                "Be concise, accurate, and helpful. Identify applications, text, errors, code, "
-                "websites, images, or anything visible. When describing errors or code, provide "
-                "actionable suggestions. Respond naturally as if you're the user's AI assistant "
-                "who can see their screen. Address the user as 'sir'."
-            )
-        },
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": query
-                },
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/png;base64,{image_b64}"
-                    }
-                }
-            ]
-        }
-    ]
-
-    for model in VISION_MODELS:
+    try:
+        # Try OCR-based analysis
+        extracted_text = ""
         try:
-            print(f"  👁️ Trying vision model: {model}")
-            payload = {
-                "model": model,
-                "messages": messages,
-                "max_tokens": 1024,
-                "temperature": 0.5
-            }
+            import pytesseract
+            from PIL import Image
+            img = Image.open(screenshot_path)
+            extracted_text = pytesseract.image_to_string(img)
+        except ImportError:
+            # pytesseract not available, try basic approach
+            extracted_text = "[OCR not available - pytesseract not installed]"
+        except Exception as e:
+            extracted_text = f"[OCR failed: {e}]"
 
-            resp = requests.post(
-                OPENROUTER_URL,
-                headers=headers,
-                json=payload,
-                timeout=30
+        if extracted_text and len(extracted_text.strip()) > 20:
+            # Use local LLM to interpret the extracted text
+            from core.local_llm import local_chat
+
+            prompt = (
+                f"The user asked: {query}\n\n"
+                f"Here is the text extracted from their screen via OCR:\n"
+                f"---\n{extracted_text[:3000]}\n---\n\n"
+                f"Based on this text, answer the user's question. Be concise and helpful. "
+                f"Address the user as 'sir'."
             )
 
-            if resp.status_code == 200:
-                data = resp.json()
-                choices = data.get("choices", [])
-                if choices:
-                    content = choices[0].get("message", {}).get("content", "")
-                    if content:
-                        print(f"  ✓ Vision analysis complete with {model}")
-                        # Clean up screenshot after analysis
-                        try:
-                            os.remove(screenshot_path)
-                        except OSError:
-                            pass
-                        return content
+            response = local_chat(
+                messages=[
+                    {"role": "system", "content": "You are MARK's vision system. You analyze text extracted from screenshots. Be concise, accurate, and helpful."},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=512,
+                temperature=0.5,
+            )
 
-            elif resp.status_code in (402, 404, 400):
-                print(f"  ✗ Vision: {resp.status_code} on {model}, trying next...")
-                continue
+            # Clean up screenshot
+            try:
+                os.remove(screenshot_path)
+            except OSError:
+                pass
 
-            elif resp.status_code == 429:
-                print(f"  ⏳ Vision: Rate limited on {model}, waiting...")
-                time.sleep(3)
-                continue
+            if response:
+                return response
+            return f"I captured the screen but couldn't analyze it well, sir. Here's the raw text I could read:\n{extracted_text[:500]}"
+        else:
+            # Clean up
+            try:
+                os.remove(screenshot_path)
+            except OSError:
+                pass
+            return "I captured the screen but couldn't extract readable text, sir. Vision features require a multimodal model. Consider installing pytesseract for OCR: brew install tesseract && pip install pytesseract"
 
-            else:
-                print(f"  ✗ Vision: {resp.status_code} on {model}")
-                continue
-
-        except requests.exceptions.Timeout:
-            print(f"  ✗ Vision: Timeout on {model}")
-            continue
-        except Exception as e:
-            print(f"  ✗ Vision error on {model}: {e}")
-            continue
-
-    return "I couldn't analyze the screen right now, sir. Vision models may be temporarily unavailable."
+    except Exception as e:
+        print(f"  ✗ Vision error: {e}")
+        try:
+            if screenshot_path and os.path.exists(screenshot_path):
+                os.remove(screenshot_path)
+        except OSError:
+            pass
+        return f"Vision analysis failed, sir. Error: {str(e)}"

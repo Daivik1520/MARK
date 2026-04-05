@@ -39,6 +39,14 @@ from agents.universal_search import search_content
 from agents.data_extractor import scrape_data
 from tools.ghost_cursor import move_mouse, click_at, click_text, scroll_screen, type_text, drag_to, get_screen_size
 from agents.website_builder import build_website
+from tools.terminal import run_terminal, read_file, write_file, edit_file, list_directory, get_system_info
+from core.mcp_client import (
+    mcp_status, mcp_connect, mcp_disconnect, mcp_list_tools,
+    mcp_add_server, mcp_remove_server, mcp_call_tool_sync, mcp_is_tool,
+)
+from tools.vision_click import vision_click, vision_find, vision_describe, vision_type, vision_interact
+from tools.rag_memory import rag_remember, rag_recall, rag_forget, rag_list, rag_stats
+from core.ollama_engine import check_ollama, list_ollama_models, pull_ollama_model, set_ollama_model
 
 
 def _run_applescript(script: str) -> str:
@@ -74,20 +82,66 @@ def _run_shell(cmd: str) -> str:
 # ─────────────────────────────────────────────
 
 def open_app(app_name: str) -> str:
-    """Open an application using Spotlight search via AppleScript."""
-    script = f'''
-    tell application "System Events"
-        key code 49 using command down
-        delay 0.5
-        keystroke "{app_name}"
-        delay 1.0
-        key code 36
-    end tell
-    '''
-    result = _run_applescript(script)
-    if "Error" not in result:
-        return f"Opening {app_name} now, sir."
-    return f"I encountered an issue opening {app_name}: {result}"
+    """Open an application or alias efficiently."""
+    import re
+    aliases = {
+        "yt": "YouTube",
+        "fb": "Facebook",
+        "ig": "Instagram",
+        "whatsapp": "WhatsApp",
+        "discord": "Discord",
+        "vscode": "Visual Studio Code"
+    }
+
+    # Split by " and " or "," to handle multiple apps in one command
+    parts = [p.strip() for p in re.split(r'\band\b|,', app_name, flags=re.IGNORECASE) if p.strip()]
+    results = []
+
+    for part in parts:
+        target = aliases.get(part.lower(), part)
+
+        # Check if the user is actually trying to run a routine 
+        # (e.g. "open coding mode", "start study mode")
+        if target.lower().endswith(" mode") or target.lower().endswith(" routine") or target.lower() == "good morning":
+            from services.routines import run_routine
+            # Try to run the routine instead of opening an app
+            res = run_routine(target)
+            results.append(target)
+            continue
+
+        # Handle website redirections for apps that are just sites
+        if target.lower() in ("youtube", "youtube.com"):
+            open_website("youtube.com")
+            results.append("YouTube")
+            continue
+        elif target.lower() in ("facebook", "facebook.com"):
+            open_website("facebook.com")
+            results.append("Facebook")
+            continue
+        elif target.lower() in ("instagram", "instagram.com"):
+            open_website("instagram.com")
+            results.append("Instagram")
+            continue
+
+        # Try `open -a` first for speed and reliability, avoiding Spotlight UI
+        ret = os.system(f'open -a "{target}" 2>/dev/null')
+        if ret == 0:
+            results.append(target)
+        else:
+            # Fallback to Spotlight search
+            script = f'''
+            tell application "System Events"
+                key code 49 using command down
+                delay 0.5
+                keystroke "{target}"
+                delay 1.0
+                key code 36
+            end tell
+            '''
+            _run_applescript(script)
+            results.append(target)
+
+    return f"Opened {', '.join(results)} now, sir."
 
 
 # ─────────────────────────────────────────────
@@ -110,7 +164,7 @@ def open_website(url: str) -> str:
 # ─────────────────────────────────────────────
 
 def send_whatsapp(contact: str, message: str) -> str:
-    """Open WhatsApp, search for a contact, and send a message."""
+    """Open WhatsApp, search for a contact using Cmd+F, and send a message."""
     # Use clipboard approach since WhatsApp text fields reject keystroke
     safe_contact = contact.replace('\\', '\\\\').replace('"', '\\"')
     safe_message = message.replace('\\', '\\\\').replace('"', '\\"')
@@ -123,12 +177,12 @@ def send_whatsapp(contact: str, message: str) -> str:
     tell application "System Events"
         tell process "WhatsApp"
             set frontmost to true
-            delay 0.5
-            
-            -- Step 2: Open new chat / search
-            keystroke "n" using command down
-            delay 1.5
         end tell
+        delay 0.5
+        
+        -- Step 2: Cmd+F to search chats (more reliable than Cmd+N)
+        keystroke "f" using command down
+        delay 1.5
     end tell
     
     -- Step 3: Paste the contact name via clipboard
@@ -136,7 +190,7 @@ def send_whatsapp(contact: str, message: str) -> str:
     delay 0.3
     tell application "System Events"
         keystroke "v" using command down
-        delay 2.0
+        delay 2.5
         
         -- Step 4: Select first result
         key code 125  -- Down arrow
@@ -150,7 +204,7 @@ def send_whatsapp(contact: str, message: str) -> str:
     delay 0.3
     tell application "System Events"
         keystroke "v" using command down
-        delay 0.5
+        delay 0.8
         
         -- Step 6: Send
         key code 36   -- Enter to send
@@ -606,6 +660,37 @@ TOOL_MAP = {
     "get_screen_size": get_screen_size,
     # Website Builder
     "build_website": build_website,
+    # Terminal Executor
+    "run_terminal": run_terminal,
+    "read_file": read_file,
+    "write_file": write_file,
+    "edit_file": edit_file,
+    "list_directory": list_directory,
+    "get_system_info": get_system_info,
+    # MCP (Model Context Protocol)
+    "mcp_status": mcp_status,
+    "mcp_connect": mcp_connect,
+    "mcp_disconnect": mcp_disconnect,
+    "mcp_list_tools": mcp_list_tools,
+    "mcp_add_server": mcp_add_server,
+    "mcp_remove_server": mcp_remove_server,
+    # Vision Click (AI-powered screen interaction)
+    "vision_click": vision_click,
+    "vision_find": vision_find,
+    "vision_describe": vision_describe,
+    "vision_type": vision_type,
+    "vision_interact": vision_interact,
+    # RAG Memory (semantic vector memory)
+    "rag_remember": rag_remember,
+    "rag_recall": rag_recall,
+    "rag_forget": rag_forget,
+    "rag_list": rag_list,
+    "rag_stats": rag_stats,
+    # Ollama
+    "check_ollama": check_ollama,
+    "list_ollama_models": list_ollama_models,
+    "pull_ollama_model": pull_ollama_model,
+    "set_ollama_model": set_ollama_model,
 }
 
 # Free models often send wrong param names. Map common variants to correct ones.
@@ -679,6 +764,51 @@ ARGUMENT_ALIASES = {
     "get_screen_size": {},
     "build_website": {"desc": "description", "prompt": "description", "what": "description", "type": "description",
                       "project": "name", "folder": "name", "title": "name"},
+    # Terminal Executor
+    "run_terminal": {"cmd": "command", "shell": "command", "exec": "command", "run": "command",
+                     "dir": "working_dir", "cwd": "working_dir", "path": "working_dir",
+                     "time": "timeout", "max_time": "timeout"},
+    "read_file": {"path": "file_path", "file": "file_path", "name": "file_path"},
+    "write_file": {"path": "file_path", "file": "file_path", "name": "file_path",
+                   "text": "content", "data": "content", "body": "content"},
+    "edit_file": {"path": "file_path", "file": "file_path", "name": "file_path",
+                  "find": "old_text", "search": "old_text", "original": "old_text",
+                  "replace": "new_text", "replacement": "new_text", "with": "new_text"},
+    "list_directory": {"dir": "path", "folder": "path", "directory": "path",
+                       "hidden": "show_hidden", "all": "show_hidden"},
+    "get_system_info": {},
+    # MCP
+    "mcp_status": {},
+    "mcp_connect": {"name": "server_name", "server": "server_name"},
+    "mcp_disconnect": {"name": "server_name", "server": "server_name"},
+    "mcp_list_tools": {},
+    "mcp_add_server": {"server": "name", "server_name": "name", "cmd": "command",
+                       "arguments": "args", "params": "args",
+                       "environment": "env", "env_vars": "env"},
+    "mcp_remove_server": {"server": "name", "server_name": "name"},
+    # Vision Click
+    "vision_click": {"target": "instruction", "element": "instruction", "button": "instruction",
+                     "what": "instruction", "find": "instruction", "click": "instruction"},
+    "vision_find": {"target": "instruction", "element": "instruction", "what": "instruction",
+                    "look_for": "instruction", "search": "instruction"},
+    "vision_describe": {},
+    "vision_type": {"target": "instruction", "field": "instruction", "input": "instruction",
+                    "content": "text", "value": "text", "string": "text"},
+    "vision_interact": {"what": "target", "element": "target", "with": "target",
+                        "do": "action", "type": "action"},
+    # RAG Memory
+    "rag_remember": {"info": "text", "data": "text", "memory": "text", "content": "text",
+                     "type": "category", "tag": "category", "from": "source"},
+    "rag_recall": {"search": "query", "find": "query", "what": "query", "about": "query",
+                   "limit": "n_results", "count": "n_results", "top": "n_results"},
+    "rag_forget": {"delete": "query", "remove": "query", "text": "query", "memory": "query"},
+    "rag_list": {"type": "category", "tag": "category", "filter": "category"},
+    "rag_stats": {},
+    # Ollama
+    "check_ollama": {},
+    "list_ollama_models": {},
+    "pull_ollama_model": {"model": "model_name", "name": "model_name"},
+    "set_ollama_model": {"model": "model", "name": "model"},
 }
 
 
@@ -695,6 +825,10 @@ def _normalize_args(tool_name, args):
 
 def execute_tool(tool_name: str, arguments: dict) -> str:
     """Execute a tool by name with given arguments. Includes argument normalization."""
+    # Handle MCP tools dynamically
+    if mcp_is_tool(tool_name):
+        return mcp_call_tool_sync(tool_name, arguments)
+
     func = TOOL_MAP.get(tool_name)
     if not func:
         return f"Unknown tool: {tool_name}"

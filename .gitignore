@@ -6,7 +6,16 @@ __pycache__/
 .vscode/
 venv/
 env/
+
 screenshots/
 memory.json
 routines.json
 reminders.json
+models/
+rag_data/
+*.png
+*.jpg
+*.jpeg
+*.log
+.DS_Store
+__pycache__/

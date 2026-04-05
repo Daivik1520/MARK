@@ -2,6 +2,7 @@
 # ═══════════════════════════════════════════════
 #  M.A.R.K. — One-Click Setup & Run
 #  Machine Augmented Reality Kernel
+#  100% Local AI — Gemma 2 2B (Metal GPU)
 # ═══════════════════════════════════════════════
 
 set -e
@@ -18,11 +19,12 @@ echo -e "${ORANGE}${BOLD}"
 echo "    ╔══════════════════════════════════════╗"
 echo "    ║         M.A.R.K. SETUP               ║"
 echo "    ║    Machine Augmented Reality Kernel   ║"
+echo "    ║    🧠 Local Gemma 2 2B (GPU)          ║"
 echo "    ╚══════════════════════════════════════╝"
 echo -e "${NC}"
 
 # ─── Check Python ───
-echo -e "${CYAN}[1/5]${NC} Checking Python..."
+echo -e "${CYAN}[1/4]${NC} Checking Python..."
 if command -v python3 &>/dev/null; then
     PY=$(python3 --version 2>&1)
     echo -e "  ${GREEN}✓${NC} $PY"
@@ -33,7 +35,7 @@ else
 fi
 
 # ─── Check pip ───
-echo -e "${CYAN}[2/5]${NC} Checking pip..."
+echo -e "${CYAN}[2/4]${NC} Checking pip..."
 if python3 -m pip --version &>/dev/null; then
     echo -e "  ${GREEN}✓${NC} pip available"
 else
@@ -43,51 +45,17 @@ else
 fi
 
 # ─── Install dependencies ───
-echo -e "${CYAN}[3/5]${NC} Installing dependencies..."
+echo -e "${CYAN}[3/4]${NC} Installing dependencies..."
 python3 -m pip install -r requirements.txt --break-system-packages -q 2>/dev/null || \
 python3 -m pip install -r requirements.txt -q 2>/dev/null || \
 pip3 install -r requirements.txt -q 2>/dev/null
 echo -e "  ${GREEN}✓${NC} All dependencies installed"
 
 # ─── Install Playwright browsers (for web scraping/browser copilot) ───
-echo -e "${CYAN}[4/5]${NC} Setting up Playwright browsers..."
+echo -e "${CYAN}[4/4]${NC} Setting up Playwright browsers..."
 python3 -m playwright install chromium 2>/dev/null && \
     echo -e "  ${GREEN}✓${NC} Chromium browser ready" || \
     echo -e "  ${ORANGE}⚠${NC} Playwright setup skipped (browser features may not work)"
-
-# ─── Check .env file ───
-echo -e "${CYAN}[5/5]${NC} Checking configuration..."
-if [ -f ".env" ]; then
-    if grep -q "your_openrouter_api_key_here" .env 2>/dev/null; then
-        echo -e "  ${RED}✗ OPENROUTER_API_KEY not set in .env!${NC}"
-        echo ""
-        echo -e "  ${BOLD}To fix:${NC}"
-        echo "  1. Get a free API key at: https://openrouter.ai/keys"
-        echo "  2. Edit the .env file: nano .env"
-        echo "  3. Replace 'your_openrouter_api_key_here' with your key"
-        echo "  4. Run this script again"
-        echo ""
-        exit 1
-    fi
-    echo -e "  ${GREEN}✓${NC} .env configured"
-else
-    echo -e "  ${ORANGE}⚠${NC} No .env file found — creating template..."
-    cat > .env << 'EOF'
-# MARK AI System Controller - Environment Configuration
-# Get your free key at: https://openrouter.ai/keys
-OPENROUTER_API_KEY=your_openrouter_api_key_here
-
-# Optional: SerpAPI for web search (https://serpapi.com)
-SERPAPI_KEY=
-
-# Optional: NewsAPI for news briefings (https://newsapi.org)
-NEWSAPI_KEY=
-EOF
-    echo -e "  ${RED}✗ Please edit .env and add your OPENROUTER_API_KEY${NC}"
-    echo "  Get one free at: https://openrouter.ai/keys"
-    echo ""
-    exit 1
-fi
 
 # ─── Kill existing MARK if running ───
 if lsof -ti:5001 &>/dev/null; then
@@ -105,6 +73,7 @@ echo -e "${ORANGE}${BOLD}"
 echo "    ╔══════════════════════════════════════╗"
 echo "    ║         M.A.R.K. IS LIVE             ║"
 echo "    ║     http://localhost:5001             ║"
+echo "    ║     🧠 Gemma 2 2B (Local GPU)        ║"
 echo "    ║     Press Ctrl+C to stop             ║"
 echo "    ╚══════════════════════════════════════╝"
 echo -e "${NC}"

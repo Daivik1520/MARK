@@ -2,23 +2,14 @@
 MARK — Website Builder
 Generates complete multi-file websites (HTML + CSS + JS) from natural language.
 Creates project folder on Desktop and opens in browser.
+Powered by local Gemma 2 2B.
 """
 
 import os
-import json
 import subprocess
-import requests
 from dotenv import load_dotenv
 
 load_dotenv()
-
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-
-MODELS = [
-    "deepseek/deepseek-chat-v3-0324:free",
-    "google/gemini-2.0-flash-001",
-    "meta-llama/llama-4-maverick:free",
-]
 
 # ─────────────────────────────────────────────
 # GENERATE EACH FILE SEPARATELY (more reliable)
@@ -64,72 +55,43 @@ Rules:
 
 
 def _call_ai(system_prompt, user_prompt):
-    """Call OpenRouter with retry across models. Returns raw text."""
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-    ]
-
-    for model in MODELS:
-        try:
-            print(f"    → Trying {model}...")
-            resp = requests.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers=headers,
-                json={"model": model, "messages": messages, "max_tokens": 4096, "temperature": 0.3},
-                timeout=25,
-            )
-            if resp.status_code == 200:
-                content = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-                if content:
-                    # Strip markdown code fences if present
-                    if content.startswith("```"):
-                        lines = content.split("\n")
-                        if lines[-1].strip() == "```":
-                            lines = lines[1:-1]
-                        else:
-                            lines = lines[1:]
-                        content = "\n".join(lines)
-                    print(f"    ✓ Got {len(content)} chars from {model}")
-                    return content
-            elif resp.status_code in (402, 404):
-                print(f"    ✗ {resp.status_code} on {model}, skipping")
-                continue
-            elif resp.status_code == 429:
-                print(f"    ✗ Rate limited on {model}")
-                import time
-                time.sleep(2)
-                continue
+    """Call local Gemma model. Returns raw text content."""
+    try:
+        from core.local_llm import local_chat
+        response = local_chat(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=4096,
+            temperature=0.3,
+        )
+        if not response:
+            return None
+        content = response.strip()
+        # Strip markdown code fences if model included them
+        if content.startswith("```"):
+            lines = content.split("\n")
+            if lines[-1].strip() == "```":
+                lines = lines[1:-1]
             else:
-                print(f"    ✗ {resp.status_code} on {model}")
-                continue
-        except Exception as e:
-            print(f"    ✗ Error on {model}: {e}")
-            continue
-
-    return None
+                lines = lines[1:]
+            content = "\n".join(lines)
+        print(f"    ✓ Got {len(content)} chars from local Gemma")
+        return content
+    except Exception as e:
+        print(f"    ✗ Website builder AI error: {e}")
+        return None
 
 
 def build_website(description, name=""):
     """
     Generate a complete website from a natural language description.
     Creates a project folder on Desktop with index.html, style.css, script.js.
-
-    Args:
-        description: What the website should be (e.g. "a calendar website")
-        name: Optional project folder name (auto-generated if empty)
-
-    Returns:
-        Confirmation with folder path
     """
     if not description:
         return "❌ Please describe what website to build."
 
-    # Generate folder name
     if not name:
         words = description.lower().split()
         skip = {"a", "an", "the", "make", "build", "create", "website", "site", "page", "web", "for", "me", "my"}
@@ -138,37 +100,31 @@ def build_website(description, name=""):
 
     name = name.replace(" ", "-").lower()
 
-    # Create folder
     project_dir = os.path.join(os.path.expanduser("~/Desktop"), name)
     os.makedirs(project_dir, exist_ok=True)
 
     task = f"Build this website: {description}"
 
-    # Generate HTML
     print(f"  🌐 [1/3] Generating HTML...")
     html = _call_ai(HTML_PROMPT, task)
     if not html:
-        return "❌ Failed to generate HTML. AI models may be rate-limited — try again in a moment."
+        return "❌ Failed to generate HTML. Try again."
 
-    # Generate CSS
     print(f"  🎨 [2/3] Generating CSS...")
     css = _call_ai(CSS_PROMPT, task + "\n\nThe HTML structure is:\n" + html[:1500])
     if not css:
-        css = "/* CSS generation failed — add your styles here */\nbody { font-family: sans-serif; margin: 0; padding: 20px; background: #1a1a2e; color: #eee; }"
+        css = "/* CSS generation failed */\nbody { font-family: sans-serif; margin: 0; padding: 20px; background: #1a1a2e; color: #eee; }"
 
-    # Generate JS
     print(f"  ⚡ [3/3] Generating JavaScript...")
     js = _call_ai(JS_PROMPT, task + "\n\nThe HTML structure is:\n" + html[:1500])
     if not js:
-        js = "// JavaScript generation failed — add your logic here\nconsole.log('Website loaded');"
+        js = "// JavaScript generation failed\nconsole.log('Website loaded');"
 
-    # Ensure HTML has CSS and JS links
     if "style.css" not in html:
         html = html.replace("</head>", '    <link rel="stylesheet" href="style.css">\n</head>')
     if "script.js" not in html:
         html = html.replace("</body>", '    <script src="script.js"></script>\n</body>')
 
-    # Write files
     files_written = []
 
     with open(os.path.join(project_dir, "index.html"), "w", encoding="utf-8") as f:
@@ -183,7 +139,6 @@ def build_website(description, name=""):
         f.write(js)
     files_written.append("script.js")
 
-    # Open in browser
     html_path = os.path.join(project_dir, "index.html")
     try:
         subprocess.Popen(["open", html_path])

@@ -44,7 +44,17 @@ const DOM = {
     settingsOverlay: document.getElementById('settingsOverlay'),
     btnCloseSettings: document.getElementById('btnCloseSettings'),
     systemPromptEditor: document.getElementById('systemPromptEditor'),
-    btnSavePrompt: document.getElementById('btnSavePrompt')
+    btnSavePrompt: document.getElementById('btnSavePrompt'),
+    // Voice & Language
+    voiceSelect: document.getElementById('voiceSelect'),
+    rateSlider: document.getElementById('rateSlider'),
+    rateLabel: document.getElementById('rateLabel'),
+    btnSaveVoice: document.getElementById('btnSaveVoice'),
+    voiceSaveStatus: document.getElementById('voiceSaveStatus'),
+    // AI Backend
+    btnBackendGroq: document.getElementById('btnBackendGroq'),
+    btnBackendLocal: document.getElementById('btnBackendLocal'),
+    backendStatus: document.getElementById('backendStatus'),
 };
 
 // ─────────────────────────────────────────────
@@ -172,6 +182,13 @@ socket.on('tts_audio', (data) => {
     }
 });
 
+socket.on('tts_chunk', (data) => {
+    if (DOM.ttsToggle.checked && data.audio) {
+        _queueTTSChunk(data.audio, data.final || false);
+    }
+    // Empty final marker — just ignore (queue will drain naturally)
+});
+
 // ─────────────────────────────────────────────
 // MESSAGE HANDLING
 // ─────────────────────────────────────────────
@@ -263,7 +280,7 @@ function initSpeechRecognition() {
     state.recognition = new SpeechRecognition();
     state.recognition.continuous = true;        // Keep listening!
     state.recognition.interimResults = true;
-    state.recognition.lang = 'en-US';
+    state.recognition.lang = _currentLang || 'en-US';
     state.recognition.maxAlternatives = 3;      // More alternatives for better wake word matching
 
     state.recognition.onresult = handleSpeechResult;
@@ -724,10 +741,59 @@ function toggleRecording() {
 }
 
 // ─────────────────────────────────────────────
-// TTS AUDIO PLAYBACK
+// TTS AUDIO PLAYBACK — Streaming Queue System
+// Plays audio chunks seamlessly with no gaps.
+// First sentence starts playing within ~300ms.
 // ─────────────────────────────────────────────
 
+const ttsQueue = {
+    chunks: [],          // queued base64 audio chunks
+    playing: false,      // is a chunk currently playing
+    wasWakeWord: false,  // was wake word active when playback started
+    analyzerSetup: false,// has analyzer been connected
+};
+
 function playTTSAudio(base64Audio) {
+    // Legacy single-chunk path — queue it
+    _queueTTSChunk(base64Audio, true);
+}
+
+function _queueTTSChunk(base64Audio, isFinal = false) {
+    ttsQueue.chunks.push({ audio: base64Audio, final: isFinal });
+
+    // Start playing if not already
+    if (!ttsQueue.playing) {
+        // Pause wake word listener during TTS
+        ttsQueue.wasWakeWord = state.wakeWordEnabled;
+        if (ttsQueue.wasWakeWord) {
+            try { state.recognition.stop(); } catch (e) { }
+            state.wakeWordListening = false;
+        }
+        _playNextChunk();
+    }
+}
+
+function _playNextChunk() {
+    if (ttsQueue.chunks.length === 0) {
+        // All chunks played — restore state
+        ttsQueue.playing = false;
+        ttsQueue.analyzerSetup = false;
+        setOrbMode(state.wakeWordEnabled ? 'dormant' : 'idle');
+        state.currentAudio = null;
+        audioAnalyzer = null;
+        audioFreqData = null;
+
+        // Resume wake word after TTS
+        if (ttsQueue.wasWakeWord) {
+            state.wakeWordEnabled = true;
+            setTimeout(() => startWakeWordListener(), 500);
+        }
+        return;
+    }
+
+    ttsQueue.playing = true;
+    const chunk = ttsQueue.chunks.shift();
+
     try {
         // Stop any existing audio
         if (state.currentAudio) {
@@ -735,64 +801,66 @@ function playTTSAudio(base64Audio) {
             state.currentAudio = null;
         }
 
-        // Pause wake word listener during TTS to avoid feedback
-        let wasWakeWord = state.wakeWordEnabled;
-        if (wasWakeWord) {
-            try { state.recognition.stop(); } catch (e) { }
-            state.wakeWordListening = false;
-        }
-
-        const audioData = Uint8Array.from(atob(base64Audio), c => c.charCodeAt(0));
+        const audioData = Uint8Array.from(atob(chunk.audio), c => c.charCodeAt(0));
         const blob = new Blob([audioData], { type: 'audio/mp3' });
         const url = URL.createObjectURL(blob);
 
         state.currentAudio = new Audio(url);
         setOrbMode('speaking');
 
-        // Connect to Web Audio API analyzer for audio-reactive orb
+        // Connect each Audio element to the analyzer for visualization
         try {
             if (!audioCtx) audioCtx = new AudioCtx();
             const source = audioCtx.createMediaElementSource(state.currentAudio);
-            audioAnalyzer = audioCtx.createAnalyser();
-            audioAnalyzer.fftSize = 256;
-            audioAnalyzer.smoothingTimeConstant = 0.7;
-            audioFreqData = new Uint8Array(audioAnalyzer.frequencyBinCount);
+            if (!ttsQueue.analyzerSetup) {
+                audioAnalyzer = audioCtx.createAnalyser();
+                audioAnalyzer.fftSize = 256;
+                audioAnalyzer.smoothingTimeConstant = 0.7;
+                audioFreqData = new Uint8Array(audioAnalyzer.frequencyBinCount);
+                audioAnalyzer.connect(audioCtx.destination);
+                ttsQueue.analyzerSetup = true;
+            }
             source.connect(audioAnalyzer);
-            audioAnalyzer.connect(audioCtx.destination);
         } catch (e) {
-            console.log('Audio analyzer setup skipped:', e);
+            // Fallback: play without visualization
         }
 
         state.currentAudio.onended = () => {
-            setOrbMode(state.wakeWordEnabled ? 'dormant' : 'idle');
             URL.revokeObjectURL(url);
-            state.currentAudio = null;
-            audioAnalyzer = null;
-            audioFreqData = null;
-            // Resume wake word after TTS
-            if (wasWakeWord) {
-                state.wakeWordEnabled = true;
-                setTimeout(() => startWakeWordListener(), 500);
-            }
+            // Immediately play next chunk — no gap
+            _playNextChunk();
         };
 
         state.currentAudio.onerror = () => {
-            setOrbMode(state.wakeWordEnabled ? 'dormant' : 'idle');
             URL.revokeObjectURL(url);
-            state.currentAudio = null;
-            if (wasWakeWord) {
-                state.wakeWordEnabled = true;
-                setTimeout(() => startWakeWordListener(), 500);
-            }
+            _playNextChunk(); // Skip to next on error
         };
 
         state.currentAudio.play().catch(err => {
-            console.error('Audio playback error:', err);
-            setOrbMode(state.wakeWordEnabled ? 'dormant' : 'idle');
+            console.error('Audio chunk playback error:', err);
+            _playNextChunk(); // Skip to next on error
         });
     } catch (e) {
-        console.error('TTS audio error:', e);
-        setOrbMode(state.wakeWordEnabled ? 'dormant' : 'idle');
+        console.error('TTS chunk error:', e);
+        _playNextChunk(); // Skip to next
+    }
+}
+
+function stopTTSPlayback() {
+    // Clear the queue and stop current audio
+    ttsQueue.chunks = [];
+    ttsQueue.playing = false;
+    ttsQueue.analyzerSetup = false;
+    if (state.currentAudio) {
+        state.currentAudio.pause();
+        state.currentAudio = null;
+    }
+    audioAnalyzer = null;
+    audioFreqData = null;
+    setOrbMode(state.wakeWordEnabled ? 'dormant' : 'idle');
+    if (ttsQueue.wasWakeWord) {
+        state.wakeWordEnabled = true;
+        setTimeout(() => startWakeWordListener(), 500);
     }
 }
 
@@ -1004,6 +1072,199 @@ document.querySelectorAll('.chip, .quick-action').forEach(btn => {
 });
 
 // ─────────────────────────────────────────────
+// VOICE & LANGUAGE
+// ─────────────────────────────────────────────
+
+let _currentLang = 'en-US'; // kept in sync with server
+
+async function loadVoices() {
+    try {
+        const resp = await fetch('/api/voices');
+        const data = await resp.json();
+        const select = DOM.voiceSelect;
+        if (!select) return;
+
+        select.innerHTML = '';
+
+        // Group by language
+        const groups = {};
+        data.voices.forEach(v => {
+            if (!groups[v.lang]) groups[v.lang] = [];
+            groups[v.lang].push(v);
+        });
+
+        const langOrder = ['English', 'Telugu', 'Hindi', 'Tamil'];
+        const ordered = [...langOrder, ...Object.keys(groups).filter(l => !langOrder.includes(l))];
+
+        ordered.forEach(lang => {
+            if (!groups[lang]) return;
+            const grp = document.createElement('optgroup');
+            grp.label = `── ${lang} ──`;
+            groups[lang].forEach(v => {
+                const opt = document.createElement('option');
+                opt.value = v.id;
+                opt.textContent = v.name;
+                if (v.id === data.current) opt.selected = true;
+                grp.appendChild(opt);
+            });
+            select.appendChild(grp);
+        });
+    } catch (e) {
+        console.error('Failed to load voices:', e);
+    }
+}
+
+async function applyVoice() {
+    const select = DOM.voiceSelect;
+    const slider = DOM.rateSlider;
+    const statusEl = DOM.voiceSaveStatus;
+    if (!select) return;
+
+    const voiceId = select.value;
+    const rateVal = parseInt(slider ? slider.value : 10);
+    const ratePct = rateVal >= 0 ? `+${rateVal}%` : `${rateVal}%`;
+
+    try {
+        const resp = await fetch('/api/set_voice', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ voice_id: voiceId, rate: ratePct })
+        });
+        const data = await resp.json();
+        if (data.success) {
+            _currentLang = data.lang || 'en-US';
+            // Update speech recognition language on the fly
+            if (state.recognition) {
+                const wasRunning = state.wakeWordEnabled;
+                try { state.recognition.stop(); } catch (e) { }
+                state.recognition.lang = _currentLang;
+                if (wasRunning) setTimeout(() => startWakeWordListener(), 300);
+            }
+            showToast(`🗣️ Voice changed — ${select.options[select.selectedIndex].text}`, 'success');
+            if (statusEl) {
+                statusEl.textContent = '✓ Applied';
+                statusEl.style.opacity = '1';
+                setTimeout(() => { statusEl.style.opacity = '0'; }, 2500);
+            }
+        } else {
+            showToast('Failed to change voice', 'error');
+        }
+    } catch (e) {
+        showToast('Voice change error: ' + e.message, 'error');
+    }
+}
+
+// Rate slider label + gradient
+if (DOM.rateSlider && DOM.rateLabel) {
+    DOM.rateSlider.addEventListener('input', () => {
+        const v = parseInt(DOM.rateSlider.value);
+        const pct = (v + 50) / 100; // 0-1 range
+        DOM.rateSlider.style.background =
+            `linear-gradient(to right, var(--accent) ${pct * 100}%, var(--surface-4) ${pct * 100}%)`;
+        if (v === 0) DOM.rateLabel.textContent = 'Normal';
+        else if (v > 0) DOM.rateLabel.textContent = `+${v}% Faster`;
+        else DOM.rateLabel.textContent = `${v}% Slower`;
+    });
+    // Init slider position
+    DOM.rateSlider.dispatchEvent(new Event('input'));
+}
+
+if (DOM.btnSaveVoice) {
+    DOM.btnSaveVoice.addEventListener('click', applyVoice);
+}
+
+// ─────────────────────────────────────────────
+// AI BACKEND TOGGLE
+// ─────────────────────────────────────────────
+
+let _backendPollTimer = null;
+
+async function loadBackendStatus() {
+    try {
+        const resp = await fetch('/api/llm_status');
+        const data = await resp.json();
+        updateBackendUI(data.backend, data.local_model);
+    } catch (e) {
+        console.error('Backend status error:', e);
+    }
+}
+
+function updateBackendUI(backend, localModel) {
+    // Toggle buttons
+    if (DOM.btnBackendGroq) {
+        DOM.btnBackendGroq.classList.toggle('active', backend === 'groq');
+    }
+    if (DOM.btnBackendLocal) {
+        DOM.btnBackendLocal.classList.toggle('active', backend === 'local');
+    }
+
+    // Status indicator
+    const statusEl = DOM.backendStatus;
+    if (!statusEl) return;
+    const dot = statusEl.querySelector('.backend-status__dot');
+    const text = statusEl.querySelector('.backend-status__text');
+
+    if (backend === 'groq') {
+        dot.className = 'backend-status__dot';
+        text.textContent = 'Using Groq cloud (fast + tool calling)';
+        if (_backendPollTimer) { clearInterval(_backendPollTimer); _backendPollTimer = null; }
+    } else {
+        const status = localModel ? localModel.status : 'unloaded';
+        const message = localModel ? localModel.message : '';
+        dot.className = 'backend-status__dot';
+
+        if (status === 'ready') {
+            // green by default, no extra classes needed
+            text.textContent = '✓ ' + message;
+            if (_backendPollTimer) { clearInterval(_backendPollTimer); _backendPollTimer = null; }
+        } else if (status === 'loading' || status === 'downloading') {
+            dot.classList.add('loading');
+            text.textContent = '⏳ ' + message;
+            // Keep polling
+            if (!_backendPollTimer) {
+                _backendPollTimer = setInterval(loadBackendStatus, 2000);
+            }
+        } else if (status === 'error') {
+            dot.classList.add('error');
+            text.textContent = '✗ ' + message;
+            if (_backendPollTimer) { clearInterval(_backendPollTimer); _backendPollTimer = null; }
+        } else {
+            text.textContent = 'Model not loaded yet';
+        }
+    }
+}
+
+async function switchBackend(backend) {
+    try {
+        const resp = await fetch('/api/set_llm_backend', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ backend })
+        });
+        const data = await resp.json();
+        if (data.success) {
+            showToast(backend === 'local' ? '💻 Switched to Local LLM — model loading...' : '☁️ Switched to Groq cloud', 'success');
+            loadBackendStatus();
+            // Start polling if local (model may be loading)
+            if (backend === 'local' && !_backendPollTimer) {
+                _backendPollTimer = setInterval(loadBackendStatus, 2000);
+            }
+        } else {
+            showToast('Failed to switch backend', 'error');
+        }
+    } catch (e) {
+        showToast('Backend switch error: ' + e.message, 'error');
+    }
+}
+
+if (DOM.btnBackendGroq) {
+    DOM.btnBackendGroq.addEventListener('click', () => switchBackend('groq'));
+}
+if (DOM.btnBackendLocal) {
+    DOM.btnBackendLocal.addEventListener('click', () => switchBackend('local'));
+}
+
+// ─────────────────────────────────────────────
 // SETTINGS PANEL
 // ─────────────────────────────────────────────
 
@@ -1011,10 +1272,15 @@ function openSettings() {
     DOM.settingsOverlay.classList.add('active');
     // Load current system prompt from server
     socket.emit('get_system_prompt');
+    // Load voices
+    loadVoices();
+    // Load backend status
+    loadBackendStatus();
 }
 
 function closeSettings() {
     DOM.settingsOverlay.classList.remove('active');
+    if (_backendPollTimer) { clearInterval(_backendPollTimer); _backendPollTimer = null; }
 }
 
 // Open settings

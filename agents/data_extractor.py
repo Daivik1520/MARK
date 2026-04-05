@@ -2,6 +2,7 @@
 MARK — Automated Data Extractor
 Scrapes structured data from websites using Playwright + BeautifulSoup.
 Outputs CSV or JSON to the Desktop.
+Powered by Groq for fast AI planning.
 """
 
 import os
@@ -9,20 +10,23 @@ import csv
 import json
 import asyncio
 import datetime
-import requests
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 from dotenv import load_dotenv
 
 load_dotenv()
 
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL = "llama-3.3-70b-versatile"
 
-MODELS = [
-    "deepseek/deepseek-chat-v3-0324:free",
-    "google/gemini-2.0-flash-001",
-    "meta-llama/llama-4-maverick:free",
-]
+_groq_client = None
+
+def _get_groq():
+    global _groq_client
+    if _groq_client is None:
+        from groq import Groq
+        _groq_client = Groq(api_key=GROQ_API_KEY)
+    return _groq_client
 
 SCRAPE_PLAN_PROMPT = """You are a web scraping planner. Given a task, output a JSON object with:
 - "steps": array of Playwright steps (same format as browser copilot: goto, click, type, wait, scroll)
@@ -69,46 +73,32 @@ def _run_async(coro):
 
 
 def _get_scrape_plan(task):
-    """Use AI to generate a scraping plan."""
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    messages = [
-        {"role": "system", "content": SCRAPE_PLAN_PROMPT},
-        {"role": "user", "content": f"Task: {task}"},
-    ]
-
-    for model in MODELS:
-        try:
-            resp = requests.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers=headers,
-                json={"model": model, "messages": messages, "max_tokens": 2048, "temperature": 0.2},
-                timeout=20,
-            )
-            if resp.status_code == 200:
-                content = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-                if content:
-                    if content.startswith("```"):
-                        lines = content.split("\n")
-                        if lines[-1].strip() == "```":
-                            lines = lines[1:-1]
-                        else:
-                            lines = lines[1:]
-                        content = "\n".join(lines)
-                    return json.loads(content)
-            elif resp.status_code in (402, 404):
-                continue
-            elif resp.status_code == 429:
-                import time
-                time.sleep(2)
-                continue
-        except json.JSONDecodeError:
-            continue
-        except Exception:
-            continue
-    return None
+    """Use Groq AI to generate a scraping plan."""
+    try:
+        client = _get_groq()
+        response = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": SCRAPE_PLAN_PROMPT},
+                {"role": "user", "content": f"Task: {task}"},
+            ],
+            max_tokens=2048,
+            temperature=0.2,
+        )
+        content = response.choices[0].message.content.strip()
+        if content.startswith("```"):
+            lines = content.split("\n")
+            if lines[-1].strip() == "```":
+                lines = lines[1:-1]
+            else:
+                lines = lines[1:]
+            content = "\n".join(lines)
+        return json.loads(content)
+    except json.JSONDecodeError:
+        return None
+    except Exception as e:
+        print(f"  ✗ Scrape planner AI error: {e}")
+        return None
 
 
 async def _navigate_and_extract(steps, selectors, max_items=20):
