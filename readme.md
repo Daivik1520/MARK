@@ -1,35 +1,23 @@
-<div align="center">
-
-<!-- Animated Header -->
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset=""https://capsule-render.vercel.app/api?type=waving&color=0:0a0a0a,50:1a1a2e,100:e65100&height=220&section=header&text=M.A.R.K.&fontSize=80&fontColor=ffffff&animation=fadeIn&fontAlignY=38&desc=Machine%20Augmented%20Reality%20Kernel&descSize=18&descAlignY=58&descAlign=50" width="100%">
-  <img alt="M.A.R.K. Header" src="https://capsule-render.vercel.app/api?type=waving&color=0:0a0a0a,50:1a1a2e,100:e65100&height=220&section=header&text=M.A.R.K.&fontSize=80&fontColor=ffffff&animation=fadeIn&fontAlignY=38&desc=Machine%20Augmented%20Reality%20Kernel&descSize=18&descAlignY=58&descAlign=50" width="100%">
-</picture>
-
 <p align="center">
-  <img src="https://readme-typing-svg.herokuapp.com?font=Fira+Code&pause=1000&color=FF6B35&center=true&vCenter=true&width=600&lines=🎤+Say+%22MARK%22+to+Control+Your+Mac;🌐+Build+Websites+with+Voice;👻+Ghost+Cursor+—+Click+Any+Button+by+Name;📊+Scrape+Web+Data+to+CSV;⚡+FastAPI+%2B+Async+Architecture" alt="M.A.R.K. Features" />
-</p>
-
-<!-- Badges -->
-<p align="center">
-  <img alt="Python" src="https://img.shields.io/badge/Python-3.10+-blue?style=for-the-badge&logo=python&logoColor=white">
-  <img alt="Platform" src="https://img.shields.io/badge/Platform-macOS-000000?style=for-the-badge&logo=apple&logoColor=white">
-  <img alt="AI" src="https://img.shields.io/badge/AI-OpenRouter-FF6B35?style=for-the-badge&logo=openai&logoColor=white">
-  <img alt="Server" src="https://img.shields.io/badge/Server-FastAPI+Uvicorn-009688?style=for-the-badge&logo=fastapi&logoColor=white">
-  <img alt="License" src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge">
+  <img src="https://capsule-render.vercel.app/api?type=waving&color=0:0a0a0a,50:1a1a2e,100:e65100&height=220&section=header&text=M.A.R.K.&fontSize=80&fontColor=ffffff&animation=fadeIn&fontAlignY=38&desc=Machine%20Augmented%20Reality%20Kernel&descSize=18&descAlignY=58&descAlign=50" width="100%" />
 </p>
 
 <p align="center">
-  <a href="#-one-click-setup">🚀 Setup</a> •
-  <a href="#-what-can-mark-do">🌟 Features</a> •
-  <a href="#-voice-commands">🎤 Commands</a> •
-  <a href="#-architecture">🏗️ Architecture</a> •
-  <a href="#-creator">👨‍💻 Creator</a>
+  <b>Your Personal AI System Controller for macOS</b>
 </p>
 
-<img src="https://user-images.githubusercontent.com/73097560/115834477-dbab4500-a447-11eb-908a-139a6edaec5c.gif">
+<p align="center">
+  <a href="https://github.com/Daivik1520/MARK/stargazers"><img src="https://img.shields.io/github/stars/Daivik1520/MARK?style=for-the-badge&logo=starship&color=e65100&logoColor=white" /></a>
+  <a href="https://github.com/Daivik1520/MARK/blob/main/LICENSE"><img src="https://img.shields.io/github/license/Daivik1520/MARK?style=for-the-badge&logo=opensourceinitiative&color=1a1a2e&logoColor=white" /></a>
+  <a href="https://github.com/Daivik1520/MARK/issues"><img src="https://img.shields.io/github/issues/Daivik1520/MARK?style=for-the-badge&logo=gitbook&color=e65100&logoColor=white" /></a>
+  <a href="https://github.com/Daivik1520"><img src="https://img.shields.io/badge/creator-Daivik1520-1a1a2e?style=for-the-badge&logo=github&logoColor=white" /></a>
+</p>
 
-</div>
+<br/>
+
+<p align="center">
+  <img src="https://readme-typing-svg.demolab.com?font=JetBrains+Mono&weight=600&size=16&duration=3000&pause=1000&color=E65100&center=true&vCenter=true&random=false&width=500&lines=%22Hey+MARK%2C+open+VS+Code%22;%22MARK%2C+search+for+sorting+algorithms%22;%22Set+brightness+to+50%25%22;%22Send+WhatsApp+to+Dad%22;Voice-controlled+AI+for+macOS" />
+</p>
 
 ## 🎆 What is M.A.R.K.?
 
