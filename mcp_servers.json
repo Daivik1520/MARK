@@ -1,1 +1,26 @@
-{}
+{
+  "filesystem": {
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-filesystem", "~/Desktop", "~/Documents", "~/Downloads"],
+    "disabled": true,
+    "note": "Structured file access across your main folders. Say 'enable the filesystem MCP server' to turn it on."
+  },
+  "fetch": {
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-fetch"],
+    "disabled": true,
+    "note": "Fetches web pages and converts them to markdown so MARK can actually read them."
+  },
+  "memory": {
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-memory"],
+    "disabled": true,
+    "note": "Knowledge-graph memory, complementary to MARK's built-in RAG store."
+  },
+  "sequential-thinking": {
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+    "disabled": true,
+    "note": "A structured multi-step reasoning scratchpad for harder problems."
+  }
+}

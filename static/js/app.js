@@ -52,7 +52,7 @@ const DOM = {
     btnSaveVoice: document.getElementById('btnSaveVoice'),
     voiceSaveStatus: document.getElementById('voiceSaveStatus'),
     // AI Backend
-    btnBackendGroq: document.getElementById('btnBackendGroq'),
+    btnBackendOllama: document.getElementById('btnBackendOllama'),
     btnBackendLocal: document.getElementById('btnBackendLocal'),
     backendStatus: document.getElementById('backendStatus'),
 };
@@ -168,6 +168,14 @@ socket.on('thinking', (data) => {
 });
 
 socket.on('ai_response', (data) => {
+    // Close out any agent progress panel so the next task starts a fresh one.
+    if (_agentPanel && _agentPanel.isConnected) {
+        const title = _agentPanel.querySelector('.agent-progress__title');
+        if (title) title.textContent = `Done — ${data.steps || 0} steps`;
+        _agentPanel.classList.add('agent-progress--done');
+    }
+    _agentPanel = null;
+
     addMessage('ai', data.text, data.tool_calls);
     if (data.response_time) {
         DOM.responseTime.textContent = `${data.response_time}s`;
@@ -1017,6 +1025,97 @@ socket.on('proactive_alert', (data) => {
     }
 });
 
+// ── Agent progress ──
+// The server has always emitted these; nothing used to listen, so multi-step
+// tasks ran completely invisibly.
+let _agentPanel = null;
+
+function ensureAgentPanel() {
+    if (_agentPanel && _agentPanel.isConnected) return _agentPanel;
+    const panel = document.createElement('div');
+    panel.className = 'message ai agent-progress';
+    panel.innerHTML = `
+        <div class="message-avatar">M</div>
+        <div class="message-content">
+            <div class="agent-progress__title">Working through it…</div>
+            <ol class="agent-progress__steps"></ol>
+        </div>`;
+    DOM.messagesArea.appendChild(panel);
+    _agentPanel = panel;
+    scrollToBottom();
+    return panel;
+}
+
+socket.on('agentic_step', (data) => {
+    const panel = ensureAgentPanel();
+    const list = panel.querySelector('.agent-progress__steps');
+    const item = document.createElement('li');
+    const tools = (data.tools || []).join(', ');
+    item.innerHTML = tools
+        ? `<span class="agent-progress__tool">${tools}</span> ${escapeHtml(data.message || '')}`
+        : escapeHtml(data.message || '');
+    list.appendChild(item);
+    scrollToBottom();
+});
+
+socket.on('tool_used', (data) => {
+    showToast(`🛠️ ${data.name}`, 'info');
+});
+
+// ── Sensitive action awaiting approval ──
+socket.on('confirmation_required', (data) => {
+    if (!data || !data.tool) return;
+    const panel = document.createElement('div');
+    panel.className = 'message ai confirm-request';
+    const args = Object.entries(data.args || {})
+        .map(([k, v]) => `${k}: ${String(v).slice(0, 120)}`).join('\n');
+    panel.innerHTML = `
+        <div class="message-avatar">M</div>
+        <div class="message-content">
+            <div class="confirm-request__title">Needs your go-ahead</div>
+            <pre class="confirm-request__detail">${escapeHtml(data.tool)}${args ? '\n' + escapeHtml(args) : ''}</pre>
+            <div class="confirm-request__actions">
+                <button class="confirm-btn confirm-btn--yes">Run it</button>
+                <button class="confirm-btn confirm-btn--no">Cancel</button>
+            </div>
+        </div>`;
+    DOM.messagesArea.appendChild(panel);
+    scrollToBottom();
+
+    const resolve = async (approve) => {
+        panel.querySelectorAll('button').forEach(b => b.disabled = true);
+        try {
+            const resp = await fetch('/api/permissions/resolve', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ approve })
+            });
+            const result = await resp.json();
+            panel.remove();
+            addMessage('ai', result.response, result.tool_calls);
+            scrollToBottom();
+        } catch (e) {
+            showToast('Could not send that decision: ' + e.message, 'error');
+        }
+    };
+    panel.querySelector('.confirm-btn--yes').addEventListener('click', () => resolve(true));
+    panel.querySelector('.confirm-btn--no').addEventListener('click', () => resolve(false));
+});
+
+// ── Proactive speech ──
+socket.on('proactive_speak', (data) => {
+    if (DOM.ttsToggle && DOM.ttsToggle.checked && data.text) {
+        addMessage('ai', data.text, null);
+        scrollToBottom();
+    }
+});
+
+function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str == null ? '' : String(str);
+    return div.innerHTML;
+}
+
 // ── Holographic HUD Cards ──
 socket.on('hud_card', (data) => {
     const overlay = document.getElementById('hudOverlay');
@@ -1191,8 +1290,8 @@ async function loadBackendStatus() {
 
 function updateBackendUI(backend, localModel) {
     // Toggle buttons
-    if (DOM.btnBackendGroq) {
-        DOM.btnBackendGroq.classList.toggle('active', backend === 'groq');
+    if (DOM.btnBackendOllama) {
+        DOM.btnBackendOllama.classList.toggle('active', backend === 'ollama');
     }
     if (DOM.btnBackendLocal) {
         DOM.btnBackendLocal.classList.toggle('active', backend === 'local');
@@ -1204,9 +1303,9 @@ function updateBackendUI(backend, localModel) {
     const dot = statusEl.querySelector('.backend-status__dot');
     const text = statusEl.querySelector('.backend-status__text');
 
-    if (backend === 'groq') {
+    if (backend === 'ollama') {
         dot.className = 'backend-status__dot';
-        text.textContent = 'Using Groq cloud (fast + tool calling)';
+        text.textContent = 'Replies via Ollama — routing stays on-device';
         if (_backendPollTimer) { clearInterval(_backendPollTimer); _backendPollTimer = null; }
     } else {
         const status = localModel ? localModel.status : 'unloaded';
@@ -1243,7 +1342,7 @@ async function switchBackend(backend) {
         });
         const data = await resp.json();
         if (data.success) {
-            showToast(backend === 'local' ? '💻 Switched to Local LLM — model loading...' : '☁️ Switched to Groq cloud', 'success');
+            showToast(backend === 'local' ? '💻 Running fully on-device' : '🦙 Replies routed to Ollama', 'success');
             loadBackendStatus();
             // Start polling if local (model may be loading)
             if (backend === 'local' && !_backendPollTimer) {
@@ -1257,8 +1356,8 @@ async function switchBackend(backend) {
     }
 }
 
-if (DOM.btnBackendGroq) {
-    DOM.btnBackendGroq.addEventListener('click', () => switchBackend('groq'));
+if (DOM.btnBackendOllama) {
+    DOM.btnBackendOllama.addEventListener('click', () => switchBackend('ollama'));
 }
 if (DOM.btnBackendLocal) {
     DOM.btnBackendLocal.addEventListener('click', () => switchBackend('local'));
@@ -1374,3 +1473,392 @@ if (typeof PresenceDetector !== 'undefined') {
         });
     }, 3000);
 }
+
+
+// ─────────────────────────────────────────────
+// IoT & VIRTUAL MOUSE CONTROLLER FRONTEND
+// ─────────────────────────────────────────────
+
+(function initIotVirtualMouse() {
+    const btnOpenIotHud = document.getElementById('btnOpenIotHud');
+    const btnCloseIotHud = document.getElementById('btnCloseIotHud');
+    const iotHudOverlay = document.getElementById('iotHudOverlay');
+    const iotHudPanel = document.getElementById('iotHudPanel');
+    
+    if (!btnOpenIotHud || !iotHudOverlay) return;
+
+    let iotState = {};
+    let vmouseState = { x: 500, y: 300, mode: 'desktop' };
+
+    // Modal Toggle
+    btnOpenIotHud.addEventListener('click', () => {
+        iotHudOverlay.classList.add('active');
+        fetchIotDevices();
+        fetchVmouseState();
+    });
+
+    btnCloseIotHud.addEventListener('click', () => {
+        iotHudOverlay.classList.remove('active');
+    });
+
+    iotHudOverlay.addEventListener('click', (e) => {
+        if (e.target === iotHudOverlay) {
+            iotHudOverlay.classList.remove('active');
+        }
+    });
+
+    // Sub-tab Navigation
+    const hudTabs = document.querySelectorAll('.hud-tab');
+    hudTabs.forEach(tab => {
+        tab.addEventListener('click', () => {
+            hudTabs.forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.hud-tab-content').forEach(c => c.classList.remove('active'));
+            
+            tab.classList.add('active');
+            const targetId = 'tabContent' + tab.dataset.tab.charAt(0).toUpperCase() + tab.dataset.tab.slice(1);
+            const content = document.getElementById(targetId);
+            if (content) {
+                content.classList.add('active');
+                if (tab.dataset.tab === 'floorplan') {
+                    renderFloorplan();
+                }
+            }
+        });
+    });
+
+    // Mode Toggle
+    const btnModeDesktop = document.getElementById('btnModeDesktop');
+    const btnModeIot = document.getElementById('btnModeIot');
+    if (btnModeDesktop && btnModeIot) {
+        btnModeDesktop.addEventListener('click', () => {
+            btnModeDesktop.classList.add('active');
+            btnModeIot.classList.remove('active');
+            vmouseState.mode = 'desktop';
+            socket.emit('virtual_mouse_move', { x: vmouseState.x, y: vmouseState.y, mode: 'desktop' });
+        });
+        btnModeIot.addEventListener('click', () => {
+            btnModeIot.classList.add('active');
+            btnModeDesktop.classList.remove('active');
+            vmouseState.mode = 'iot_canvas';
+            socket.emit('virtual_mouse_move', { x: vmouseState.x, y: vmouseState.y, mode: 'iot_canvas' });
+        });
+    }
+
+    // Touchpad Control
+    const vmouseTrackpad = document.getElementById('vmouseTrackpad');
+    const vmouseCursorDot = document.getElementById('vmouseCursorDot');
+    const vmouseCoordsLabel = document.getElementById('vmouseCoordsLabel');
+
+    let isDragging = false;
+    let lastX = 0, lastY = 0;
+
+    function handleTrackpadMove(clientX, clientY) {
+        if (!vmouseTrackpad) return;
+        const rect = vmouseTrackpad.getBoundingClientRect();
+        const relX = Math.max(0, Math.min(rect.width, clientX - rect.left));
+        const relY = Math.max(0, Math.min(rect.height, clientY - rect.top));
+
+        // Update dot UI inside trackpad
+        if (vmouseCursorDot) {
+            vmouseCursorDot.style.left = `${relX}px`;
+            vmouseCursorDot.style.top = `${relY}px`;
+        }
+
+        // Map relative touch position to desktop/canvas coords (1920x1080)
+        const targetX = Math.round((relX / rect.width) * 1280);
+        const targetY = Math.round((relY / rect.height) * 800);
+
+        vmouseState.x = targetX;
+        vmouseState.y = targetY;
+
+        if (vmouseCoordsLabel) {
+            vmouseCoordsLabel.textContent = `Position: (${targetX}, ${targetY}) · Mode: ${vmouseState.mode}`;
+        }
+
+        socket.emit('virtual_mouse_move', { x: targetX, y: targetY, mode: vmouseState.mode });
+    }
+
+    if (vmouseTrackpad) {
+        vmouseTrackpad.addEventListener('mousedown', (e) => {
+            isDragging = true;
+            handleTrackpadMove(e.clientX, e.clientY);
+        });
+
+        window.addEventListener('mousemove', (e) => {
+            if (isDragging) {
+                handleTrackpadMove(e.clientX, e.clientY);
+            }
+        });
+
+        window.addEventListener('mouseup', () => {
+            if (isDragging) isDragging = false;
+        });
+
+        // Touch support
+        vmouseTrackpad.addEventListener('touchstart', (e) => {
+            if (e.touches.length > 0) {
+                isDragging = true;
+                handleTrackpadMove(e.touches[0].clientX, e.touches[0].clientY);
+            }
+        });
+
+        vmouseTrackpad.addEventListener('touchmove', (e) => {
+            if (isDragging && e.touches.length > 0) {
+                handleTrackpadMove(e.touches[0].clientX, e.touches[0].clientY);
+            }
+        });
+
+        vmouseTrackpad.addEventListener('touchend', () => {
+            isDragging = false;
+        });
+    }
+
+    // D-Pad Controls
+    const dpadButtons = {
+        dpadUp: { dir: 'up', step: 50 },
+        dpadDown: { dir: 'down', step: 50 },
+        dpadLeft: { dir: 'left', step: 50 },
+        dpadRight: { dir: 'right', step: 50 },
+        dpadClick: { action: 'click' }
+    };
+
+    Object.keys(dpadButtons).forEach(id => {
+        const btn = document.getElementById(id);
+        if (btn) {
+            btn.addEventListener('click', () => {
+                const conf = dpadButtons[id];
+                if (conf.action === 'click') {
+                    socket.emit('virtual_mouse_click', { button: 'left' });
+                } else {
+                    socket.emit('virtual_mouse_dpad', { direction: conf.dir, step: conf.step });
+                }
+            });
+        }
+    });
+
+    // Mouse Action Buttons
+    const btnLeft = document.getElementById('btnVmouseLeftClick');
+    const btnRight = document.getElementById('btnVmouseRightClick');
+    const btnScrollUp = document.getElementById('btnVmouseScrollUp');
+    const btnScrollDown = document.getElementById('btnVmouseScrollDown');
+
+    if (btnLeft) btnLeft.addEventListener('click', () => socket.emit('virtual_mouse_click', { button: 'left' }));
+    if (btnRight) btnRight.addEventListener('click', () => socket.emit('virtual_mouse_click', { button: 'right' }));
+    if (btnScrollUp) btnScrollUp.addEventListener('click', () => socket.emit('virtual_mouse_move', { x: 0, y: -100, relative: true }));
+    if (btnScrollDown) btnScrollDown.addEventListener('click', () => socket.emit('virtual_mouse_move', { x: 0, y: 100, relative: true }));
+
+    // REST Fetchers
+    function fetchIotDevices() {
+        fetch('/api/iot/devices')
+            .then(res => res.json())
+            .then(devices => {
+                iotState = devices;
+                renderIotDevices(devices);
+                renderFloorplan();
+            })
+            .catch(err => console.error('IoT fetch error:', err));
+    }
+
+    function fetchVmouseState() {
+        fetch('/api/virtual_mouse/state')
+            .then(res => res.json())
+            .then(st => {
+                vmouseState = st;
+                updateVmouseUI(st);
+            })
+            .catch(err => console.error('Vmouse fetch error:', err));
+    }
+
+    // Socket listeners
+    socket.on('iot_state_update', (devices) => {
+        iotState = devices;
+        renderIotDevices(devices);
+        renderFloorplan();
+    });
+
+    socket.on('virtual_mouse_update', (st) => {
+        vmouseState = st;
+        updateVmouseUI(st);
+        renderFloorplan();
+    });
+
+    function updateVmouseUI(st) {
+        if (vmouseCoordsLabel) {
+            vmouseCoordsLabel.textContent = `Position: (${st.x}, ${st.y}) · Mode: ${st.mode}`;
+        }
+    }
+
+    // Render IoT Device Cards
+    function renderIotDevices(devices) {
+        const grid = document.getElementById('iotDeviceGrid');
+        if (!grid) return;
+        grid.innerHTML = '';
+
+        Object.keys(devices).forEach(dId => {
+            const dev = devices[dId];
+            const card = document.createElement('div');
+            card.className = 'iot-card';
+            
+            const isLight = dev.type === 'light';
+            const isPlug = dev.type === 'plug';
+            const isThermo = dev.type === 'thermostat';
+            
+            let extraControls = '';
+            if (isLight && dev.state === 'on') {
+                extraControls = `
+                    <label style="font-size:11px;color:var(--text-2);">Brightness: ${dev.brightness || 100}%</label>
+                    <input type="range" class="iot-card__slider" min="10" max="100" value="${dev.brightness || 100}" 
+                        onchange="window._controlIot('${dId}', 'brightness', this.value)">
+                `;
+            } else if (isThermo) {
+                extraControls = `
+                    <label style="font-size:11px;color:var(--text-2);">Target Temp: ${dev.target_temp || 72}°F</label>
+                    <input type="range" class="iot-card__slider" min="60" max="85" value="${dev.target_temp || 72}" 
+                        onchange="window._controlIot('${dId}', 'temp', this.value)">
+                `;
+            }
+
+            card.innerHTML = `
+                <div class="iot-card__header">
+                    <div>
+                        <div class="iot-card__title">${dev.name}</div>
+                        <div class="iot-card__location">📍 ${dev.location}</div>
+                    </div>
+                    <span style="font-size:18px;">${dev.state === 'on' ? '💡' : '🔌'}</span>
+                </div>
+                <div class="iot-card__controls">
+                    <button class="btn-subtab ${dev.state === 'on' ? 'active' : ''}" 
+                        onclick="window._controlIot('${dId}', 'toggle')">
+                        ${dev.state.toUpperCase()}
+                    </button>
+                    <span style="font-size:11px;color:var(--accent);">${dev.type.toUpperCase()}</span>
+                </div>
+                ${extraControls}
+            `;
+            grid.appendChild(card);
+        });
+    }
+
+    // Global helper for inline card event handlers
+    window._controlIot = function(deviceId, action, val) {
+        socket.emit('iot_control', { device_id: deviceId, action: action, value: val });
+    };
+
+    // 2D Floorplan Canvas Renderer
+    function renderFloorplan() {
+        const canvas = document.getElementById('iotFloorplanCanvas');
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        const w = canvas.width;
+        const h = canvas.height;
+
+        ctx.clearRect(0, 0, w, h);
+
+        // Draw Room Grid & Boundaries
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
+        ctx.lineWidth = 1;
+
+        // Grid lines
+        for (let x = 0; x < w; x += 40) {
+            ctx.beginPath();
+            ctx.moveTo(x, 0);
+            ctx.lineTo(x, h);
+            ctx.stroke();
+        }
+        for (let y = 0; y < h; y += 40) {
+            ctx.beginPath();
+            ctx.moveTo(0, y);
+            ctx.lineTo(w, y);
+            ctx.stroke();
+        }
+
+        // Rooms
+        ctx.strokeStyle = 'rgba(255, 106, 0, 0.3)';
+        ctx.lineWidth = 2;
+        
+        // Living Room
+        ctx.strokeRect(20, 20, 280, 160);
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+        ctx.font = '11px sans-serif';
+        ctx.fillText('Living Room', 30, 40);
+
+        // Bedroom
+        ctx.strokeRect(320, 20, 260, 160);
+        ctx.fillText('Bedroom', 330, 40);
+
+        // Office
+        ctx.strokeRect(20, 200, 280, 150);
+        ctx.fillText('Office', 30, 220);
+
+        // Hallway
+        ctx.strokeRect(320, 200, 260, 150);
+        ctx.fillText('Hallway', 330, 220);
+
+        // Render IoT Devices on Canvas
+        Object.keys(iotState).forEach(dId => {
+            const dev = iotState[dId];
+            const pos = dev.pos || { x: 100, y: 100 };
+            
+            // Map pos to canvas scale
+            const cx = (pos.x / 650) * w;
+            const cy = (pos.y / 450) * h;
+
+            // Draw device node
+            ctx.beginPath();
+            ctx.arc(cx, cy, 14, 0, Math.PI * 2);
+            ctx.fillStyle = dev.state === 'on' ? 'rgba(255, 170, 0, 0.3)' : 'rgba(100, 100, 100, 0.2)';
+            ctx.fill();
+            ctx.strokeStyle = dev.state === 'on' ? '#ffaa00' : '#666';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // Label
+            ctx.fillStyle = '#fff';
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(dev.name, cx, cy + 26);
+        });
+
+        // Render Virtual Mouse Cursor on Canvas
+        if (vmouseState) {
+            const cursorX = (vmouseState.x / 1280) * w;
+            const cursorY = (vmouseState.y / 800) * h;
+
+            // Pulse glow ring
+            ctx.beginPath();
+            ctx.arc(cursorX, cursorY, 12, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(255, 106, 0, 0.3)';
+            ctx.fill();
+
+            // Core dot
+            ctx.beginPath();
+            ctx.arc(cursorX, cursorY, 5, 0, Math.PI * 2);
+            ctx.fillStyle = '#ff6a00';
+            ctx.fill();
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        }
+    }
+
+    // Canvas click event to toggle target IoT device directly on floorplan
+    const canvas = document.getElementById('iotFloorplanCanvas');
+    if (canvas) {
+        canvas.addEventListener('click', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const clickX = ((e.clientX - rect.left) / canvas.width) * 650;
+            const clickY = ((e.clientY - rect.top) / canvas.height) * 450;
+
+            Object.keys(iotState).forEach(dId => {
+                const dev = iotState[dId];
+                const pos = dev.pos || { x: 0, y: 0 };
+                const dist = Math.hypot(clickX - pos.x, clickY - pos.y);
+                if (dist <= 35) {
+                    socket.emit('iot_control', { device_id: dId, action: 'toggle' });
+                }
+            });
+        });
+    }
+
+})();
+

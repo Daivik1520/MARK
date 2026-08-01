@@ -171,15 +171,21 @@ class MCPManager:
         self._config = _load_config()  # refresh config
         connected = []
         failed = []
+        skipped = []
 
-        for name in self._config:
+        for name, config in self._config.items():
+            # Servers ship disabled so a missing npm package or an offline
+            # first run can never turn into a startup error.
+            if config.get("disabled"):
+                skipped.append(name)
+                continue
             ok = await self.connect(name)
             if ok:
                 connected.append(name)
             else:
                 failed.append(name)
 
-        return {"connected": connected, "failed": failed}
+        return {"connected": connected, "failed": failed, "skipped": skipped}
 
     async def disconnect(self, server_name):
         """Disconnect from a specific MCP server."""
@@ -404,6 +410,42 @@ def remove_server_config(name):
 def list_server_configs():
     """List all configured MCP servers."""
     return _load_config()
+
+
+def enabled_server_configs():
+    """Only the servers that are actually set to connect."""
+    return {name: cfg for name, cfg in _load_config().items() if not cfg.get("disabled")}
+
+
+def mcp_enable_server(name=""):
+    """Enable a configured MCP server and connect to it."""
+    config = _load_config()
+    if name not in config:
+        available = ", ".join(config) or "none configured"
+        return f"No MCP server called '{name}'. Available: {available}"
+    config[name]["disabled"] = False
+    _save_config(config)
+    MCPManager()._config = config
+    ok = mcp_connect_server_sync(name)
+    if ok:
+        return f"Enabled and connected to MCP server '{name}'."
+    return (f"Enabled '{name}' but the connection failed. "
+            f"Check that its command is installed and you're online.")
+
+
+def mcp_disable_server(name=""):
+    """Disable a configured MCP server and disconnect it."""
+    config = _load_config()
+    if name not in config:
+        return f"No MCP server called '{name}'."
+    config[name]["disabled"] = True
+    _save_config(config)
+    MCPManager()._config = config
+    try:
+        _run_async(MCPManager().disconnect(name))
+    except Exception:
+        pass
+    return f"Disabled MCP server '{name}'."
 
 
 # ─────────────────────────────────────────────

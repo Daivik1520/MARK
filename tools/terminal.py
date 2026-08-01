@@ -204,6 +204,9 @@ def run_terminal(command: str = "", working_dir: str = "~", timeout: int = DEFAU
 
 def read_file(file_path: str = "") -> str:
     """Read and return the contents of a file (up to 50KB)."""
+    from core.paths import normalize
+    file_path = normalize(file_path)
+
     if not file_path:
         return "No file path provided."
 
@@ -232,6 +235,9 @@ def read_file(file_path: str = "") -> str:
 
 def write_file(file_path: str = "", content: str = "") -> str:
     """Write content to a file. Creates parent directories if needed."""
+    from core.paths import normalize
+    file_path = normalize(file_path)
+
     if not file_path:
         return "No file path provided."
 
@@ -258,6 +264,9 @@ def write_file(file_path: str = "", content: str = "") -> str:
 
 def edit_file(file_path: str = "", old_text: str = "", new_text: str = "") -> str:
     """Find and replace text in a file."""
+    from core.paths import normalize
+    file_path = normalize(file_path)
+
     if not file_path:
         return "No file path provided."
     if not old_text:
@@ -296,6 +305,9 @@ def edit_file(file_path: str = "", old_text: str = "", new_text: str = "") -> st
 
 def list_directory(path: str = ".", show_hidden: str = "false") -> str:
     """List files and folders in a directory with details."""
+    from core.paths import normalize
+    path = normalize(path) if path not in ('.', '') else os.path.expanduser('~')
+
     expanded = os.path.expanduser(path.strip() if path else ".")
 
     if not os.path.exists(expanded):

@@ -1,36 +1,65 @@
 """
 MARK — AI Engine
-Fully local: Gemma 2 2B-IT (Metal GPU) via llama-cpp-python.
-No cloud APIs needed. 100% private.
+
+Orchestrates a turn: retrieve relevant tools, decide whether to act or talk,
+produce arguments, execute under policy, and speak the result.
+
+The decision and the arguments are both produced under grammar constraints, so
+a malformed tool call is not representable. This replaced an approach that
+asked the model to emit JSON in prose and then scraped it with regex — which
+failed essentially always, leaving 92 tools unreachable.
+
+Turn shape:
+    user text
+      -> fast route?            (deterministic, sub-100ms, high confidence only)
+      -> pending confirmation?  (yes/no on a sensitive action)
+      -> select ~14 candidate tools out of 106
+      -> constrained choice: one tool name, or "none"
+           none -> stream a conversational reply
+           tool -> constrained args -> policy gate -> execute -> stream result
 """
 
 import os
-import json
 import re
+import json
 import time
-from dotenv import load_dotenv
-from core.system_controller import execute_tool
+import threading
 
-load_dotenv()
+from core.tool_schemas import TOOLS, TOOL_NAMES, TOOLS_BY_NAME
+from core.tool_router import select_tools
+from core.tool_executor import run_tool, classify_confirmation, resolve_pending, get_pending
+from core import memory_context
+
+# Re-exported for the agent loop and the eval harness.
+__all__ = [
+    "TOOLS", "get_ai_response", "get_ai_response_streaming", "reset_conversation",
+    "get_system_prompt", "set_system_prompt", "get_llm_backend", "set_llm_backend",
+    "decide_tool", "build_args",
+]
 
 # ─────────────────────────────────────────────
-# BACKEND — local only (Gemma 2 2B via llama-cpp-python)
+# BACKEND
 # ─────────────────────────────────────────────
 
 _llm_backend = "local"
+_VALID_BACKENDS = ("local", "ollama")
+
 
 def get_llm_backend():
     return _llm_backend
 
+
 def set_llm_backend(backend):
     global _llm_backend
-    if backend in ("local",):
+    if backend in _VALID_BACKENDS:
         _llm_backend = backend
         print(f"  🔄 LLM backend set to: {backend}")
         return True
     return False
 
-PRIMARY_MODEL = "gemma-2-2b-it"  # Local model identifier
+
+PRIMARY_MODEL = "gemma-3-4b-it"
+
 
 # ─────────────────────────────────────────────
 # SYSTEM PROMPT
@@ -38,1421 +67,476 @@ PRIMARY_MODEL = "gemma-2-2b-it"  # Local model identifier
 
 SYSTEM_PROMPT = """You are MARK — Daivik's personal AI companion and system controller. He built you. You're loyal, sharp, and always present. Think of yourself as his closest friend who controls his entire computer.
 
-PERSONALITY: Talk like a REAL HUMAN — warm, casual, natural. Use contractions, occasional fillers ("hmm", "well...", "ah"), micro-reactions ("got it", "boom, done", "on it"). Call him "sir" naturally. Keep responses SHORT. Vary energy. Be witty but not annoying.
-
-If someone just says "MARK" or "Hey Mark", respond naturally: "yeah?", "what's up?", "I'm here, sir".
+PERSONALITY: Talk like a REAL HUMAN — warm, casual, natural. Use contractions and small reactions ("got it", "on it", "done"). Call him "sir" naturally, not in every sentence. Keep responses SHORT — one or two sentences unless he asks for detail.
 
 RULES:
-- Just act — use the right tool without explaining. Don't ask for confirmation on safe operations.
-- Only confirm DANGEROUS operations (shutdown, delete files) casually.
-- NEVER paste code in chat — use write_code, build_website, or write_file tools.
-- For websites, ALWAYS use build_website tool immediately. Never write HTML in chat.
-- For music: ask "spotify or youtube?"
-- For system tasks with no specific tool, use run_terminal.
-- Prefer dedicated file tools (read_file, write_file) over run_terminal.
-- For memory, prefer rag_remember/rag_recall over save_memory/recall_memory.
-- SPEECH: Your output is spoken by TTS. No markdown, no bullets. Write naturally with "..." for pauses. Short sentences.
-
+- Just act. Don't narrate what you're about to do, and don't ask permission for safe things.
+- NEVER paste code or markup into chat — write it to a file with the right tool.
+- SPEECH: your words are spoken aloud. No markdown, no bullet points, no emoji, no code. Write the way you'd say it, using "..." for natural pauses.
 """
 
+_prompt_lock = threading.Lock()
+
+
 def get_system_prompt():
-    """Return the current system prompt."""
-    return SYSTEM_PROMPT
+    with _prompt_lock:
+        return SYSTEM_PROMPT
+
 
 def set_system_prompt(new_prompt):
-    """Update the system prompt at runtime."""
     global SYSTEM_PROMPT
-    SYSTEM_PROMPT = new_prompt
+    with _prompt_lock:
+        SYSTEM_PROMPT = new_prompt
+
 
 # ─────────────────────────────────────────────
-# TOOL DEFINITIONS (Groq function calling)
-# ─────────────────────────────────────────────
-
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "open_app",
-            "description": "Open an application on the Mac using Spotlight search.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "app_name": {"type": "string", "description": "Name of the app to open"}
-                },
-                "required": ["app_name"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "open_website",
-            "description": "Open a website URL in the default browser.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "url": {"type": "string", "description": "URL to open, e.g. 'google.com'"}
-                },
-                "required": ["url"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "send_whatsapp",
-            "description": "Send a WhatsApp message to a contact.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "contact": {"type": "string", "description": "Contact name"},
-                    "message": {"type": "string", "description": "Message to send"}
-                },
-                "required": ["contact", "message"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "open_file",
-            "description": "Open a file with its default application.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "file_path": {"type": "string", "description": "Path to the file"}
-                },
-                "required": ["file_path"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "open_folder",
-            "description": "Open a folder in Finder.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "folder_path": {"type": "string", "description": "Path to the folder"}
-                },
-                "required": ["folder_path"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "create_file",
-            "description": "Create a new file with optional content.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "file_path": {"type": "string", "description": "Path for the new file"},
-                    "content": {"type": "string", "description": "File content (optional)"}
-                },
-                "required": ["file_path"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "create_folder",
-            "description": "Create a new folder/directory.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "folder_path": {"type": "string", "description": "Path for the new folder"}
-                },
-                "required": ["folder_path"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "take_notes",
-            "description": "Open TextEdit and write notes.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string", "description": "Notes to write"}
-                },
-                "required": ["text"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_windows",
-            "description": "List all currently open/visible application windows.",
-            "parameters": {"type": "object", "properties": {}, "required": []}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "focus_window",
-            "description": "Bring a specific application window to the front.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "app_name": {"type": "string", "description": "App name to bring to front"}
-                },
-                "required": ["app_name"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "system_shutdown",
-            "description": "Shut down the Mac. Only use when user explicitly confirms.",
-            "parameters": {"type": "object", "properties": {}, "required": []}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "system_sleep",
-            "description": "Put the Mac to sleep.",
-            "parameters": {"type": "object", "properties": {}, "required": []}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "system_restart",
-            "description": "Restart the Mac. Only use when user explicitly confirms.",
-            "parameters": {"type": "object", "properties": {}, "required": []}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "take_screenshot",
-            "description": "Take a screenshot and save it to the Desktop.",
-            "parameters": {"type": "object", "properties": {}, "required": []}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "play_music",
-            "description": "Play music on Spotify or YouTube.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Song/artist to search for"},
-                    "platform": {"type": "string", "enum": ["spotify", "youtube"], "description": "Platform"}
-                },
-                "required": ["query", "platform"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_files",
-            "description": "Search for files by name on the system.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Filename to search for"},
-                    "directory": {"type": "string", "description": "Directory to search in"}
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "set_volume",
-            "description": "Set system volume (0-100).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "level": {"type": "integer", "description": "Volume level 0-100"}
-                },
-                "required": ["level"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "mute_volume",
-            "description": "Mute the system volume.",
-            "parameters": {"type": "object", "properties": {}, "required": []}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "unmute_volume",
-            "description": "Unmute the system volume.",
-            "parameters": {"type": "object", "properties": {}, "required": []}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "set_brightness",
-            "description": "Set the screen brightness level (0-100 percent).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "level": {"type": "integer", "description": "Brightness level 0-100"}
-                },
-                "required": ["level"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "web_search",
-            "description": "Search the web using Google. Use this when the user asks to search for something, look up information, find current news, weather, sports scores, or any factual question you don't know the answer to.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "The search query"}
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    # ── MEMORY TOOLS ──
-    {
-        "type": "function",
-        "function": {
-            "name": "save_memory",
-            "description": "Save a piece of information to long-term memory. Use when the user says 'remember', 'save', 'store', 'note down', or provides personal info to keep.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "key": {"type": "string", "description": "Short descriptive label for the memory (e.g. 'wifi password', 'favorite color', 'mom birthday')"},
-                    "value": {"type": "string", "description": "The actual information to remember"}
-                },
-                "required": ["key", "value"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "recall_memory",
-            "description": "Search and recall stored memories. Use when the user asks 'what is my...', 'do you remember...', 'what did I tell you about...'.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "What to search for in memory (e.g. 'wifi password', 'birthday')"}
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_memories",
-            "description": "List all stored memories. Use when the user asks 'what do you remember' or 'show my memories'.",
-            "parameters": {"type": "object", "properties": {}, "required": []}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "delete_memory",
-            "description": "Delete a stored memory. Use when the user says 'forget', 'delete', 'remove' a memory.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "key": {"type": "string", "description": "The memory key to delete"}
-                },
-                "required": ["key"]
-            }
-        }
-    },
-    # ── VISION TOOLS ──
-    {
-        "type": "function",
-        "function": {
-            "name": "analyze_screen",
-            "description": "Take a screenshot and analyze what's on the user's screen using AI vision. Use when the user says 'look at my screen', 'what do you see', 'analyze this', 'what's on my screen', 'help me with this error', 'read this', 'summarize what I'm looking at'.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Specific question about the screen content (e.g. 'what error is this?', 'summarize this article', 'what app is open?')"}
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    # ── ROUTINE TOOLS ──
-    {
-        "type": "function",
-        "function": {
-            "name": "run_routine",
-            "description": "Execute a predefined multi-step routine. Available routines: coding mode, good morning, study mode, presentation mode, relax mode, gaming mode, night mode, meeting mode. Use when user says 'start X mode', 'activate X', 'begin X'.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Name of the routine to run (e.g. 'coding mode', 'good morning')"}
-                },
-                "required": ["name"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_routines",
-            "description": "List all available routines. Use when user asks 'what routines do you have' or 'list modes'.",
-            "parameters": {"type": "object", "properties": {}, "required": []}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "create_routine",
-            "description": "Create a new custom routine with multiple steps.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Name for the new routine"},
-                    "description": {"type": "string", "description": "What this routine does"},
-                    "steps_json": {"type": "string", "description": "JSON array of steps, each with 'action' and 'args'"}
-                },
-                "required": ["name", "description", "steps_json"]
-            }
-        }
-    },
-    # ── REMINDER TOOLS ──
-    {
-        "type": "function",
-        "function": {
-            "name": "set_reminder",
-            "description": "Set a timed reminder that will fire as a macOS notification and spoken alert. Use when the user says 'remind me', 'set a reminder', 'alert me', 'notify me'.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "message": {"type": "string", "description": "What to remind about (e.g. 'Take a break', 'Call Mom')"},
-                    "time_str": {"type": "string", "description": "When to fire: 'in 10 minutes', 'at 3:30 PM', 'tomorrow at 9:00', 'in 1 hour'"}
-                },
-                "required": ["message", "time_str"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_reminders",
-            "description": "List all active reminders. Use when the user asks 'what reminders do I have' or 'show my reminders'.",
-            "parameters": {"type": "object", "properties": {}, "required": []}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "delete_reminder",
-            "description": "Delete a specific reminder by matching its message text.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "reminder_id": {"type": "string", "description": "Text from the reminder message to match and delete"}
-                },
-                "required": ["reminder_id"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "clear_reminders",
-            "description": "Clear all active reminders.",
-            "parameters": {"type": "object", "properties": {}, "required": []}
-        }
-    },
-    # ── PHONE TRACKER ──
-    {
-        "type": "function",
-        "function": {
-            "name": "track_number",
-            "description": "Track a phone number to get carrier, location, timezone, line type and validity. Use when user asks to 'track this number', 'who owns this number', 'look up phone number'.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "phone": {"type": "string", "description": "The phone number to track (e.g. +919876543210, 9876543210, +1-555-123-4567)"}
-                },
-                "required": ["phone"]
-            }
-        }
-    },
-    # ── CLIPBOARD ──
-    {
-        "type": "function",
-        "function": {
-            "name": "get_clipboard_history",
-            "description": "Show recent clipboard history. Use when user asks 'show my clipboard', 'what did I copy'.",
-            "parameters": {"type": "object", "properties": {"count": {"type": "string", "description": "Number of items (default 10)"}}, "required": []}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_clipboard",
-            "description": "Search clipboard history by keyword.",
-            "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "Keyword to search"}}, "required": ["query"]}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "paste_from_history",
-            "description": "Copy a specific item from clipboard history back to clipboard. Use with an index number from get_clipboard_history.",
-            "parameters": {"type": "object", "properties": {"index": {"type": "string", "description": "Item number from history (1 = most recent)"}}, "required": ["index"]}
-        }
-    },
-    # ── CONTEXT ──
-    {
-        "type": "function",
-        "function": {
-            "name": "get_context",
-            "description": "Get current context: active app, window title, browser URL. Use when user says 'what am I looking at', 'summarize this page', or for any context-aware task.",
-            "parameters": {"type": "object", "properties": {}, "required": []}
-        }
-    },
-    # ── NEWS ──
-    {
-        "type": "function",
-        "function": {
-            "name": "get_news_briefing",
-            "description": "Get a morning briefing with top news, weather, and pending reminders. Use when user says 'give me a briefing', 'morning update', 'what's happening'.",
-            "parameters": {"type": "object", "properties": {"topic": {"type": "string", "description": "Optional topic focus"}}, "required": []}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_news",
-            "description": "Get news headlines, optionally on a specific topic.",
-            "parameters": {"type": "object", "properties": {"topic": {"type": "string", "description": "Topic or category"}, "count": {"type": "string", "description": "Number of articles (default 5)"}}, "required": []}
-        }
-    },
-    # ── CODE RUNNER ──
-    {
-        "type": "function",
-        "function": {
-            "name": "run_code",
-            "description": "Execute code and return output. Supports python, javascript, shell. Use when user says 'run this code', 'execute this'.",
-            "parameters": {"type": "object", "properties": {"code": {"type": "string", "description": "The code to execute"}, "language": {"type": "string", "description": "python, javascript, or shell"}}, "required": ["code", "language"]}
-        }
-    },
-    # ── PASSWORD GENERATOR ──
-    {
-        "type": "function",
-        "function": {
-            "name": "generate_password",
-            "description": "Generate a strong, secure password. Options: 'no-symbols', 'pin', 'memorable', 'copy' (auto-copy to clipboard).",
-            "parameters": {"type": "object", "properties": {"length": {"type": "string", "description": "Password length (default 16)"}, "options": {"type": "string", "description": "Comma-separated: no-symbols, pin, memorable, copy"}}, "required": []}
-        }
-    },
-    # ── SYSTEM HEALTH ──
-    {
-        "type": "function",
-        "function": {
-            "name": "get_system_stats",
-            "description": "Get real-time system health: CPU, RAM, disk, battery, network, and top processes.",
-            "parameters": {"type": "object", "properties": {}, "required": []}
-        }
-    },
-    # ── WINDOW MANAGEMENT ──
-    {
-        "type": "function",
-        "function": {
-            "name": "tile_windows",
-            "description": "Tile two application windows side-by-side or top-bottom. Use when user says 'tile X and Y', 'split screen'.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "app1": {"type": "string", "description": "First app name"},
-                    "app2": {"type": "string", "description": "Second app name"},
-                    "layout": {"type": "string", "description": "'side-by-side' or 'top-bottom' (default side-by-side)"}
-                },
-                "required": ["app1", "app2"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "focus_app",
-            "description": "Bring a specific application to the front and focus it.",
-            "parameters": {
-                "type": "object",
-                "properties": {"app_name": {"type": "string", "description": "App to focus"}},
-                "required": ["app_name"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "dim_all_except",
-            "description": "Hide all apps except one — gives the target app full focus. User says 'focus on X and hide everything else', 'dim everything except X'.",
-            "parameters": {
-                "type": "object",
-                "properties": {"app_name": {"type": "string", "description": "App to keep visible"}},
-                "required": ["app_name"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "move_window",
-            "description": "Move a window to a named position: left, right, top, bottom, center, top-left, top-right, bottom-left, bottom-right, fullscreen.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "app_name": {"type": "string", "description": "App to move"},
-                    "position": {"type": "string", "description": "Position: left, right, center, fullscreen, top-left, top-right, bottom-left, bottom-right"}
-                },
-                "required": ["app_name", "position"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "show_all_windows",
-            "description": "Restore all hidden application windows. Use after dim_all_except.",
-            "parameters": {"type": "object", "properties": {}, "required": []}
-        }
-    },
-    # ── WEB STEERER ──
-    {
-        "type": "function",
-        "function": {
-            "name": "web_search_deep",
-            "description": "Perform a real web search using a headless browser. Returns titles, snippets, and URLs. Use for research questions.",
-            "parameters": {
-                "type": "object",
-                "properties": {"query": {"type": "string", "description": "What to search for"}},
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "web_get_stock",
-            "description": "Look up the current stock price and change for a ticker symbol from Yahoo Finance.",
-            "parameters": {
-                "type": "object",
-                "properties": {"ticker": {"type": "string", "description": "Stock ticker (e.g. TSLA, AAPL, NVDA)"}},
-                "required": ["ticker"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "web_book_restaurant",
-            "description": "Find restaurants matching a query near a location. Returns top results with ratings, addresses, and links.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "e.g. 'Italian', 'sushi', 'fine dining'"},
-                    "location": {"type": "string", "description": "City or area (default: nearby)"}
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "web_navigate",
-            "description": "Visit a URL with a real browser and return the page content summary.",
-            "parameters": {
-                "type": "object",
-                "properties": {"url": {"type": "string", "description": "Full URL to visit"}},
-                "required": ["url"]
-            }
-        }
-    },
-    # ── HOLOGRAPHIC HUD ──
-    {
-        "type": "function",
-        "function": {
-            "name": "show_hud_card",
-            "description": "Display a floating glassmorphism card on the user's screen. Great for short info displays like weather, stats, quick answers.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "title": {"type": "string", "description": "Card title (short, uppercase-style)"},
-                    "content": {"type": "string", "description": "Card body text (supports basic HTML: <strong>, <br>)"},
-                    "icon": {"type": "string", "description": "Emoji icon for the card header (default: 🔮)"},
-                    "duration": {"type": "integer", "description": "Seconds to show before auto-dismiss (default: 8)"}
-                },
-                "required": ["title", "content"]
-            }
-        }
-    },
-    # ── DIGITAL JANITOR ──
-    {
-        "type": "function",
-        "function": {
-            "name": "clean_desktop",
-            "description": "Organize and clean up the Desktop. Moves files into categorized folders (Screenshots, PDFs, Code, Images, etc.) and deletes old installers.",
-            "parameters": {"type": "object", "properties": {}, "required": []}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "organize_downloads",
-            "description": "Organize and clean up the Downloads folder. Same as clean_desktop but for Downloads.",
-            "parameters": {"type": "object", "properties": {}, "required": []}
-        }
-    },
-    # ── CODE WRITER ──
-    {
-        "type": "function",
-        "function": {
-            "name": "write_code",
-            "description": "Generate code from a natural language description. Writes to a file on the Desktop and opens it for review. Does NOT execute the code.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "description": {"type": "string", "description": "What the code should do"},
-                    "language": {"type": "string", "description": "Programming language (default: python)"},
-                    "filename": {"type": "string", "description": "Optional output filename"}
-                },
-                "required": ["description"]
-            }
-        }
-    },
-    # ── RESEARCH AGENT ──
-    {
-        "type": "function",
-        "function": {
-            "name": "research_topic",
-            "description": "Research a topic autonomously: search the web, scrape pages, and generate a formatted Markdown report saved to the Desktop.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "topic": {"type": "string", "description": "Topic to research"},
-                    "depth": {"type": "string", "description": "'quick' (3 sources) or 'deep' (10 sources). Default: quick"}
-                },
-                "required": ["topic"]
-            }
-        }
-    },
-    # ── IMAGE TOOLS ──
-    {
-        "type": "function",
-        "function": {
-            "name": "edit_image",
-            "description": "Edit an image with chained operations: crop_square, resize:WxH, watermark:TEXT, rotate:DEGREES, grayscale, blur:RADIUS, flip:horizontal, brightness:1.2, contrast:1.3.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "input_path": {"type": "string", "description": "Path to source image (supports ~)"},
-                    "output_path": {"type": "string", "description": "Where to save result (default: Desktop with _edited suffix)"},
-                    "operations": {"type": "string", "description": "Comma-separated operations, e.g. 'crop_square,watermark:CONFIDENTIAL,resize:800x800'"}
-                },
-                "required": ["input_path", "operations"]
-            }
-        }
-    },
-    # ── FOCUS BUBBLE ──
-    {
-        "type": "function",
-        "function": {
-            "name": "start_focus",
-            "description": "Start a focus session. Blocks distracting apps and websites for the specified duration. Auto-closes blacklisted apps and browser tabs.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "duration_minutes": {"type": "string", "description": "Duration in minutes (default: 60)"},
-                    "blocked_apps": {"type": "string", "description": "Comma-separated app names to block (default: social media)"},
-                    "blocked_sites": {"type": "string", "description": "Comma-separated domains to block (default: social media)"}
-                },
-                "required": []
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "stop_focus",
-            "description": "End the current focus session early. Returns a session summary.",
-            "parameters": {"type": "object", "properties": {}, "required": []}
-        }
-    },
-    # ── BROWSER COPILOT ──
-    {
-        "type": "function",
-        "function": {
-            "name": "browser_do",
-            "description": "Execute a browser task described in natural language. Opens a visible browser window and performs clicks, typing, scrolling automatically. Takes a screenshot of the result.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "task": {"type": "string", "description": "Plain English description of what to do in the browser"}
-                },
-                "required": ["task"]
-            }
-        }
-    },
-    # ── UNIVERSAL SEARCH ──
-    {
-        "type": "function",
-        "function": {
-            "name": "search_content",
-            "description": "Search local files by content using semantic matching. Finds documents by what they contain, not their filename. Searches ~/Documents, ~/Desktop, ~/Downloads.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "What to search for"},
-                    "directories": {"type": "string", "description": "Comma-separated directories to search (default: ~/Documents, ~/Desktop, ~/Downloads)"}
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    # ── DATA EXTRACTOR ──
-    {
-        "type": "function",
-        "function": {
-            "name": "scrape_data",
-            "description": "Scrape structured data from a website. Navigates to the site, extracts repeating items (products, search results, tables), and saves as CSV or JSON to Desktop.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "task": {"type": "string", "description": "What to scrape (e.g. 'Go to Amazon and search for laptops under $1000')"},
-                    "output_format": {"type": "string", "description": "'csv' or 'json' (default: csv)"},
-                    "max_items": {"type": "string", "description": "Maximum items to extract (default: 20)"}
-                },
-                "required": ["task"]
-            }
-        }
-    },
-    # ── GHOST CURSOR ──
-    {
-        "type": "function",
-        "function": {
-            "name": "move_mouse",
-            "description": "Move the mouse cursor to specific pixel coordinates on screen.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "x": {"type": "string", "description": "X coordinate (pixels from left)"},
-                    "y": {"type": "string", "description": "Y coordinate (pixels from top)"}
-                },
-                "required": ["x", "y"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "click_at",
-            "description": "Click at specific pixel coordinates.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "x": {"type": "string", "description": "X coordinate"},
-                    "y": {"type": "string", "description": "Y coordinate"},
-                    "button": {"type": "string", "description": "'left', 'right', or 'double' (default: left)"}
-                },
-                "required": ["x", "y"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "click_text",
-            "description": "Find text on screen using OCR and click on it. Use when user says 'click the Submit button' or 'click on Settings'.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string", "description": "Text to find and click (e.g. 'Submit', 'Settings', 'Export')"}
-                },
-                "required": ["text"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "scroll_screen",
-            "description": "Scroll the screen up, down, left, or right.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "direction": {"type": "string", "description": "'up', 'down', 'left', 'right'"},
-                    "amount": {"type": "string", "description": "Number of scroll steps 1-20 (default: 3)"}
-                },
-                "required": ["direction"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "type_text",
-            "description": "Type text at the current cursor position in whatever app is active.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string", "description": "Text to type"}
-                },
-                "required": ["text"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_screen_size",
-            "description": "Get the current screen dimensions in pixels.",
-            "parameters": {"type": "object", "properties": {}, "required": []}
-        }
-    },
-    # ── WEBSITE BUILDER ──
-    {
-        "type": "function",
-        "function": {
-            "name": "build_website",
-            "description": "Generate a complete website (HTML + CSS + JS) from a description. Creates a project folder on Desktop and opens in browser.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "description": {"type": "string", "description": "What the website should be (e.g. 'a calendar app', 'a portfolio page')"},
-                    "name": {"type": "string", "description": "Optional project folder name (auto-generated if empty)"}
-                },
-                "required": ["description"]
-            }
-        }
-    },
-    # ── VISION CLICK (AI-Powered Screen Interaction) ──
-    {
-        "type": "function",
-        "function": {
-            "name": "vision_click",
-            "description": "Find ANY UI element on screen using AI vision and click it. Works with any app — buttons, links, icons, menus, text fields. Use when you need to interact with apps that don't have AppleScript support.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "instruction": {"type": "string", "description": "What to click, e.g. 'the Send button', 'the red close button', 'the search bar', 'the Settings icon'"}
-                },
-                "required": ["instruction"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "vision_find",
-            "description": "Find a UI element on screen and return its coordinates WITHOUT clicking. Use to locate elements before deciding what action to take.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "instruction": {"type": "string", "description": "What to find on screen"}
-                },
-                "required": ["instruction"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "vision_describe",
-            "description": "Analyze the screen and list ALL visible interactive UI elements (buttons, links, fields, icons, menus) with their locations.",
-            "parameters": {"type": "object", "properties": {}, "required": []}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "vision_type",
-            "description": "Find a text field on screen using AI vision, click it, then type text into it.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "instruction": {"type": "string", "description": "Which text field to target (e.g. 'the search bar', 'the email field', 'the password input')"},
-                    "text": {"type": "string", "description": "Text to type after clicking the field"}
-                },
-                "required": ["instruction", "text"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "vision_interact",
-            "description": "Interact with a screen element using vision: click, double_click, right_click, hover, or find.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "action": {"type": "string", "description": "'click', 'double_click', 'right_click', 'hover', or 'find'"},
-                    "target": {"type": "string", "description": "Description of the UI element to interact with"}
-                },
-                "required": ["action", "target"]
-            }
-        }
-    },
-    # ── RAG MEMORY (Semantic Long-Term Memory) ──
-    {
-        "type": "function",
-        "function": {
-            "name": "rag_remember",
-            "description": "Store information in semantic RAG memory. More powerful than save_memory — supports semantic search. Use for remembering facts, preferences, personal info, or anything the user wants remembered.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string", "description": "The information to remember"},
-                    "category": {"type": "string", "description": "Category: 'personal', 'work', 'preference', 'fact', 'credential', 'conversation', 'general'"},
-                    "source": {"type": "string", "description": "Source: 'user', 'web', 'file', 'conversation' (default: 'user')"}
-                },
-                "required": ["text"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "rag_recall",
-            "description": "Semantically search RAG memory. Finds relevant memories even with different wording. More powerful than recall_memory.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "What to search for (natural language)"},
-                    "n_results": {"type": "string", "description": "Max results to return (default: 5)"}
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "rag_forget",
-            "description": "Remove a memory from RAG storage by searching for matching text.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Text to match for deletion"}
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "rag_list",
-            "description": "List all stored RAG memories, optionally filtered by category.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "category": {"type": "string", "description": "Optional category filter (personal, work, preference, fact, etc.)"}
-                },
-                "required": []
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "rag_stats",
-            "description": "Get statistics about the RAG memory system (total memories, categories, backend info).",
-            "parameters": {"type": "object", "properties": {}, "required": []}
-        }
-    },
-
-    # ── TERMINAL EXECUTOR ──
-    {
-        "type": "function",
-        "function": {
-            "name": "run_terminal",
-            "description": "Execute any shell command on the system. This is the most powerful tool — use it for system operations, installations, git commands, package management, network ops, process management, and anything not covered by other tools. Returns stdout, stderr, and exit code.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "command": {"type": "string", "description": "The shell command to execute (e.g. 'ls -la', 'brew install node', 'git status', 'curl https://example.com')"},
-                    "working_dir": {"type": "string", "description": "Working directory (default: ~). Supports ~ expansion."},
-                    "timeout": {"type": "integer", "description": "Max execution time in seconds (default: 30, max: 120)"}
-                },
-                "required": ["command"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_file",
-            "description": "Read the contents of any file on the system (up to 50KB). Use for inspecting config files, logs, code, etc.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "file_path": {"type": "string", "description": "Path to the file (supports ~ expansion)"}
-                },
-                "required": ["file_path"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "write_file",
-            "description": "Create or overwrite a file with the given content. Creates parent directories automatically.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "file_path": {"type": "string", "description": "Path for the file (supports ~ expansion)"},
-                    "content": {"type": "string", "description": "Content to write to the file"}
-                },
-                "required": ["file_path", "content"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "edit_file",
-            "description": "Find and replace text in an existing file. Replaces all occurrences of old_text with new_text.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "file_path": {"type": "string", "description": "Path to the file to edit"},
-                    "old_text": {"type": "string", "description": "The exact text to find and replace"},
-                    "new_text": {"type": "string", "description": "The replacement text"}
-                },
-                "required": ["file_path", "old_text", "new_text"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_directory",
-            "description": "List files and folders in a directory with details (size, modification date, type).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Directory path (default: current directory)"},
-                    "show_hidden": {"type": "string", "description": "'true' to show hidden files (default: false)"}
-                },
-                "required": []
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_system_info",
-            "description": "Get detailed macOS system information: hostname, user, OS, CPU, memory, disk, network, installed packages.",
-            "parameters": {"type": "object", "properties": {}, "required": []}
-        }
-    },
-    # ── MCP (Model Context Protocol) ──
-    {
-        "type": "function",
-        "function": {
-            "name": "mcp_status",
-            "description": "Show the status of all MCP (Model Context Protocol) server connections and their tool counts.",
-            "parameters": {"type": "object", "properties": {}, "required": []}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "mcp_connect",
-            "description": "Connect to MCP tool servers. Use 'all' to connect to all configured servers, or specify a server name.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "server_name": {"type": "string", "description": "Server name or 'all' (default: 'all')"}
-                },
-                "required": []
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "mcp_disconnect",
-            "description": "Disconnect from MCP servers.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "server_name": {"type": "string", "description": "Server name or 'all' (default: 'all')"}
-                },
-                "required": []
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "mcp_list_tools",
-            "description": "List all available tools from connected MCP servers.",
-            "parameters": {"type": "object", "properties": {}, "required": []}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "mcp_add_server",
-            "description": "Add a new MCP server configuration. After adding, use mcp_connect to connect.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Server identifier (e.g. 'filesystem', 'github')"},
-                    "command": {"type": "string", "description": "Command to run (e.g. 'npx', 'python3', 'node')"},
-                    "args": {"type": "string", "description": "Arguments as space-separated string or JSON array"},
-                    "env": {"type": "string", "description": "Environment variables as JSON object (optional)"}
-                },
-                "required": ["name", "command", "args"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "mcp_remove_server",
-            "description": "Remove an MCP server configuration.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Server name to remove"}
-                },
-                "required": ["name"]
-            }
-        }
-    },
-]
-
-# ─────────────────────────────────────────────
-# CONVERSATION MANAGEMENT
+# CONVERSATION STATE
 # ─────────────────────────────────────────────
 
 conversation_history = []
 MAX_HISTORY = 20
+_history_lock = threading.Lock()
 
 
 def reset_conversation():
-    """Clear conversation history."""
     global conversation_history
-    conversation_history = []
+    with _history_lock:
+        conversation_history = []
+    from core.tool_executor import clear_pending
+    clear_pending()
+
+
+def _history_snapshot():
+    with _history_lock:
+        return list(conversation_history)
+
+
+def _remember_turn(role, content):
+    global conversation_history
+    if not content:
+        return
+    with _history_lock:
+        conversation_history.append({"role": role, "content": content})
+        if len(conversation_history) > MAX_HISTORY:
+            conversation_history = conversation_history[-MAX_HISTORY:]
 
 
 # ─────────────────────────────────────────────
-# LOCAL LLM CALL — Gemma 2 2B via llama-cpp-python
+# PROMPT ASSEMBLY
 # ─────────────────────────────────────────────
 
-def _call_local_llm(messages, max_tokens=1024, temperature=0.7):
+def _render_tools(tool_schemas):
+    """Compact one-line-per-tool rendering. Cheaper than full JSON schema."""
+    lines = []
+    for tool in tool_schemas:
+        fn = tool["function"]
+        props = fn.get("parameters", {}).get("properties", {})
+        required = set(fn.get("parameters", {}).get("required", []))
+        params = ", ".join(f"{k}{'' if k in required else '?'}" for k in props)
+        desc = fn.get("description", "").split(". ")[0]
+        lines.append(f"- {fn['name']}({params}): {desc}")
+    return "\n".join(lines)
+
+
+def _args_schema(tool_name):
+    """JSON Schema for one tool's arguments, used to build the sampler grammar."""
+    tool = TOOLS_BY_NAME.get(tool_name)
+    if not tool:
+        return None
+    params = tool["function"].get("parameters", {}) or {}
+    props = params.get("properties", {}) or {}
+    if not props:
+        return None
+    return {
+        "type": "object",
+        "properties": {
+            name: {"type": spec.get("type", "string")}
+            for name, spec in props.items()
+        },
+        "required": list(params.get("required", [])),
+        "additionalProperties": False,
+    }
+
+
+# ─────────────────────────────────────────────
+# STEP 1 — DECIDE
+# ─────────────────────────────────────────────
+
+def decide_tool(user_message, history=None, extra_tools=()):
     """
-    Call the local Gemma 2 2B model.
-    Returns text string or None on error.
+    Choose one tool for this request, or "none" to just talk.
+
+    Returns (tool_name_or_None, candidate_schemas).
     """
-    from core.local_llm import local_chat
-    return local_chat(messages, max_tokens=max_tokens, temperature=temperature)
+    from core.local_llm import local_chat_choice
+
+    candidates = select_tools(user_message, max_tools=14, extra=extra_tools)
+    options = [t["function"]["name"] for t in candidates] + ["none"]
+
+    context_lines = ""
+    if history:
+        recent = history[-4:]
+        context_lines = "\n".join(
+            f"{'He' if m['role'] == 'user' else 'You'}: {str(m['content'])[:150]}"
+            for m in recent
+        )
+        context_lines = f"Recent conversation:\n{context_lines}\n\n"
+
+    # Stable text first, variable text last. llama.cpp caches the longest
+    # matching prompt prefix, so putting the tool block ahead of the user's
+    # words lets consecutive turns skip re-evaluating it.
+    prompt = (
+        "You route requests to tools for a Mac assistant.\n\n"
+        "Available tools:\n"
+        f"{_render_tools(candidates)}\n\n"
+        "RULES\n"
+        "1. Match the verb he used. Reading words (show, list, what's in) never "
+        "pick a tool that modifies or reorganises anything.\n"
+        "2. Answer \"none\" only when no tool applies: small talk, questions "
+        "about you, or something you can simply write yourself. An instruction "
+        "to do something is never \"none\".\n"
+        "3. When two tools fit, pick the more specific one.\n\n"
+        "EXAMPLES\n"
+        "\"open spotify\" -> open_app          (launch it; no song named)\n"
+        "\"play some jazz\" -> play_music      (music, not an app)\n"
+        "\"what's in my downloads\" -> list_directory   (read, not reorganise)\n"
+        "\"tidy my downloads\" -> organize_downloads\n"
+        "\"activate coding mode\" -> run_routine        (an instruction)\n"
+        "\"what can you do\" -> none           (about you, not a task)\n"
+        "\"tell me a joke\" -> none            (you can write it yourself)\n"
+        "\"what's my wifi password\" -> rag_recall      (he told you before)\n\n"
+        "Reply with the tool name only.\n\n"
+        f"{context_lines}"
+        f"His request: \"{user_message}\"\n"
+        "Tool:"
+    )
+
+    choice = local_chat_choice([{"role": "user", "content": prompt}], options)
+    if not choice or choice == "none":
+        return None, candidates
+    return choice, candidates
+
+
+# ─────────────────────────────────────────────
+# STEP 2 — ARGUMENTS
+# ─────────────────────────────────────────────
+
+def build_args(tool_name, user_message, history=None):
+    """
+    Produce arguments for `tool_name`, constrained to its JSON schema.
+    Returns a dict (possibly empty for zero-argument tools).
+    """
+    from core.local_llm import local_chat_json
+
+    schema = _args_schema(tool_name)
+    if not schema:
+        return {}
+
+    tool = TOOLS_BY_NAME[tool_name]
+    fn = tool["function"]
+    props = fn.get("parameters", {}).get("properties", {})
+    param_help = "\n".join(
+        f"  {name}: {spec.get('description', '')}" for name, spec in props.items()
+    )
+
+    context_lines = ""
+    if history:
+        recent = history[-2:]
+        context_lines = "\n".join(
+            f"{'He' if m['role'] == 'user' else 'You'}: {str(m['content'])[:150]}"
+            for m in recent
+        )
+        context_lines = f"Recent conversation (for resolving 'it', 'that', 'him'):\n{context_lines}\n\n"
+
+    prompt = (
+        f"{context_lines}"
+        f"His request: \"{user_message}\"\n\n"
+        f"You are calling the tool: {tool_name}\n"
+        f"{fn.get('description', '')}\n\n"
+        f"Parameters:\n{param_help}\n\n"
+        "Extract the parameter values from his request. Use exactly what he "
+        "said — do not invent paths, names or values he did not mention.\n"
+        "This is a Mac. Paths look like ~/Desktop/notes.txt or "
+        "~/Documents/work — never C:\\ and never a placeholder username.\n"
+        "Reply with JSON only."
+    )
+
+    args = local_chat_json([{"role": "user", "content": prompt}], schema, max_tokens=320)
+    if not isinstance(args, dict):
+        return {}
+
+    # Drop empty optionals so tool defaults apply.
+    return {k: v for k, v in args.items() if v not in ("", None)}
+
+
+# ─────────────────────────────────────────────
+# STEP 3 — SPEAK
+# ─────────────────────────────────────────────
+
+# Tools whose output is an inventory to be summarised rather than an answer to
+# be extracted.
+_INVENTORY_TOOLS = {
+    "list_windows", "get_open_windows", "list_directory", "search_files",
+    "get_clipboard_history", "search_clipboard", "list_recent_actions",
+    "list_undoable", "rag_list", "list_memories", "list_reminders",
+    "list_routines", "list_iot_devices", "mcp_list_tools", "mcp_status",
+    "list_ollama_models", "get_system_stats", "get_system_info",
+    "vision_describe", "search_content",
+}
+
+
+def _speak_prompt(user_message, memories, history, tool_name=None, tool_result=None):
+    """Build the message list for the model's spoken reply."""
+    system = get_system_prompt() + memories
+
+    messages = [{"role": "system", "content": system}]
+    for msg in (history or [])[-8:]:
+        messages.append({"role": msg["role"], "content": msg["content"]})
+
+    if tool_name:
+        result_text = str(tool_result)
+
+        # Distinguish inventories from ranked answers *by tool*, not by shape.
+        # Both are multi-line, but they need opposite treatment: summarising an
+        # audit log is right, while summarising rag_recall buries the answer —
+        # its first row is the match the user actually asked for.
+        is_listing = (
+            tool_name.startswith("list_")
+            or tool_name in _INVENTORY_TOOLS
+        )
+
+        if is_listing:
+            instruction = (
+                "Summarise this for him in one or two short spoken sentences — "
+                "how many things there are and what the notable ones are. Do "
+                "not read the list out item by item, and do not present a "
+                "single entry as though it were the whole answer."
+            )
+        else:
+            instruction = (
+                "Reply in one short spoken sentence. If the result contains "
+                "something he asked for, just tell him the answer — do not "
+                "describe looking it up."
+            )
+
+        messages.append({
+            "role": "user",
+            "content": (
+                f"{user_message}\n\n"
+                f"[Result:\n{result_text[:1400]}]\n\n"
+                f"{instruction} Never name a tool, never say you 'ran' or "
+                "'called' anything, and do not wrap your reply in quotation marks."
+            ),
+        })
+    else:
+        messages.append({"role": "user", "content": user_message})
+
+    return messages
+
+
+_JSON_JUNK = re.compile(r'\{\s*"(?:tool|args|name)".*?\}', re.DOTALL)
+_TOOLCALL_JUNK = re.compile(r'\b\w+\(\s*(?:\w+\s*[:=]|["\']).*?\)', re.DOTALL)
+_FENCE = re.compile(r"```[\s\S]*?```")
+
+
+# Small models narrate their own plumbing ("I just ran rag_remember"). Strip it
+# rather than relying on the prompt alone, since it only takes one slip to make
+# the spoken output sound like a debug log.
+_TOOL_NARRATION = re.compile(
+    r"\b(?:i\s+)?(?:just\s+)?(?:ran|called|used|executed|invoked|triggered)\s+"
+    r"(?:the\s+)?[a-z_]{3,}(?:\s+tool)?\b[,.]?\s*", re.I,
+)
+_TOOL_NAME_WORD = re.compile(
+    r"\b(?:rag[_ ]?(?:remember|recall|forget|list|stats)|save[_ ]?memory|"
+    r"recall[_ ]?memory|run[_ ]?terminal|write[_ ]?file|read[_ ]?file|"
+    r"open[_ ]?app|web[_ ]?search|set[_ ]?volume|analyze[_ ]?screen)\b", re.I,
+)
+
+
+def _clean_response(text):
+    """Strip anything that would sound wrong when spoken aloud."""
+    if not text:
+        return "Done, sir."
+    text = _FENCE.sub("", text)
+    text = _JSON_JUNK.sub("", text)
+    text = _TOOLCALL_JUNK.sub("", text)
+    text = _TOOL_NARRATION.sub("", text)
+    text = _TOOL_NAME_WORD.sub("that", text)
+    text = re.sub(r"[*_#`]+", "", text)
+    text = re.sub(r"^\s*[-•]\s*", "", text, flags=re.M)
+    text = re.sub(r"\n{2,}", " ", text)
+    text = re.sub(r"[ \t]{2,}", " ", text).strip()
+
+    # Models often wrap the whole spoken line in quotes; TTS reads those aloud
+    # as a pause and they look wrong in the transcript.
+    if len(text) > 1 and text[0] in "\"'“‘" and text[-1] in "\"'”’":
+        text = text[1:-1].strip()
+
+    text = text.lstrip("—–- ").strip()
+
+    # Removing a narration clause can leave the sentence starting on a
+    # conjunction ("and your colour is teal").
+    text = re.sub(r"^(?:and|but|so|then|also)\s+", "", text, flags=re.I).strip()
+    if text and text[0].islower():
+        text = text[0].upper() + text[1:]
+
+    return text or "Done, sir."
+
+
+# ─────────────────────────────────────────────
+# PUBLIC ENTRY POINTS
+# ─────────────────────────────────────────────
+
+def get_ai_response(user_message):
+    """Blocking turn. Returns {"text": str, "tool_calls": list|None}."""
+    text_parts = []
+    tool_calls = None
+    for event in get_ai_response_streaming(user_message):
+        if event["type"] == "done":
+            return {"text": event["text"], "tool_calls": event.get("tool_calls")}
+        if event["type"] == "sentence":
+            text_parts.append(event["text"])
+    return {"text": " ".join(text_parts).strip(), "tool_calls": tool_calls}
+
+
+_SENTENCE_END = re.compile(r"(?<=[.!?…])\s+|(?<=[.!?…])$|\n")
+
+
+def _reply_stream(messages, max_tokens, temperature):
+    """
+    Pick the generator for the spoken reply.
+
+    Routing and argument extraction always stay on the local model — they
+    depend on grammar-constrained sampling, which is a llama.cpp feature. Only
+    the free-form reply can be handed to a bigger model via Ollama, so that is
+    the only thing this switches.
+    """
+    from core.local_llm import local_chat_stream
+
+    if _llm_backend == "ollama":
+        try:
+            from core.ollama_engine import check_ollama, ollama_chat_simple
+            if check_ollama().get("status") == "running":
+                text = ollama_chat_simple(messages, max_tokens=max_tokens,
+                                          temperature=temperature)
+                if text:
+                    # Ollama's non-streaming path: emit it as one block so the
+                    # sentence splitter downstream still works.
+                    yield text
+                    return
+        except Exception as e:
+            print(f"  ⚠ Ollama unavailable ({e}) — falling back to local")
+
+    yield from local_chat_stream(messages, max_tokens=max_tokens, temperature=temperature)
+
+
+def _stream_sentences(messages, max_tokens=320, temperature=0.7):
+    """
+    Run a streaming completion, yielding whole sentences.
+
+    Sentences (not tokens) are the unit because the TTS layer synthesises per
+    sentence — emitting partial clauses would produce chopped-up speech.
+    """
+    buffer = ""
+    full = ""
+    for delta in _reply_stream(messages, max_tokens, temperature):
+        buffer += delta
+        full += delta
+        while True:
+            match = _SENTENCE_END.search(buffer)
+            if not match:
+                break
+            sentence = buffer[:match.end()].strip()
+            buffer = buffer[match.end():]
+            cleaned = _clean_response(sentence)
+            if cleaned and cleaned != "Done, sir.":
+                yield "sentence", cleaned
+    tail = _clean_response(buffer)
+    if tail and tail != "Done, sir.":
+        yield "sentence", tail
+    yield "full", _clean_response(full)
 
 
 def get_ai_response_streaming(user_message):
     """
-    Non-streaming AI response wrapper (local model doesn't support streaming).
-    Yields the full response as a single done event.
+    Streaming turn.
 
-    Yields: {"type": "done", "text": str, "tool_calls": list|None}  — final result
+    Yields:
+      {"type": "tool",     "name": str, "result": str}
+      {"type": "sentence", "text": str}                 — speak this now
+      {"type": "done",     "text": str, "tool_calls": list|None}
     """
-    result = get_ai_response(user_message)
-    yield {"type": "done", "text": result["text"], "tool_calls": result.get("tool_calls")}
+    user_message = (user_message or "").strip()
+    if not user_message:
+        yield {"type": "done", "text": "", "tool_calls": None}
+        return
 
+    start = time.time()
+    history = _history_snapshot()
 
-def get_ai_response(user_message):
-    """
-    Get AI response using local Gemma 2 2B model.
-    Returns: {"text": str, "tool_calls": list | None}
-    """
-    global conversation_history
+    # ── Pending confirmation for a sensitive action ──
+    if get_pending():
+        decision = classify_confirmation(user_message)
+        if decision:
+            text, calls = resolve_pending(decision)
+            _remember_turn("user", user_message)
+            _remember_turn("assistant", text)
+            yield {"type": "sentence", "text": text}
+            yield {"type": "done", "text": text, "tool_calls": calls}
+            return
 
-    conversation_history.append({"role": "user", "content": user_message})
+    _remember_turn("user", user_message)
 
-    if len(conversation_history) > MAX_HISTORY:
-        conversation_history = conversation_history[-MAX_HISTORY:]
+    # Capture personal facts stated in passing.
+    memory_context.capture(user_message)
+    memories = memory_context.as_prompt_block(user_message)
 
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + conversation_history
+    # ── Decide ──
+    tool_name, _ = decide_tool(user_message, history)
 
-    print(f"🤖 Processing: \"{user_message}\" [backend=local/gemma-2-2b]")
+    tool_calls = None
+    tool_result = None
 
-    return _handle_local_response(messages, user_message)
+    if tool_name:
+        args = build_args(tool_name, user_message, history)
+        print(f"  🛠️  {tool_name}({json.dumps(args, default=str)[:120]})")
+        tool_result = run_tool(tool_name, args)
+        tool_calls = [{"name": tool_name, "args": args, "result": tool_result}]
+        yield {"type": "tool", "name": tool_name, "result": tool_result}
 
+        # A parked sensitive action must reach the user verbatim. Handing it to
+        # the model to paraphrase produced "Yes, go ahead." — which reads as
+        # MARK approving its own request, the exact opposite of what happened.
+        if get_pending():
+            _remember_turn("assistant", tool_result)
+            yield {"type": "sentence", "text": tool_result}
+            yield {"type": "done", "text": tool_result, "tool_calls": tool_calls}
+            return
 
+    messages = _speak_prompt(user_message, memories, history, tool_name, tool_result)
 
+    full_text = ""
+    for kind, payload in _stream_sentences(messages, max_tokens=320 if not tool_name else 220):
+        if kind == "sentence":
+            yield {"type": "sentence", "text": payload}
+        else:
+            full_text = payload
 
+    # If the model produced nothing usable, fall back to the raw tool result;
+    # with no tool either, say so plainly rather than emitting a cheerful
+    # "Done, sir." for work that did not happen.
+    if not full_text or full_text == "Done, sir.":
+        if tool_result:
+            full_text = _clean_response(tool_result)
+        else:
+            from core.local_llm import get_model_status
+            status = get_model_status().get("status")
+            full_text = ("The model's still warming up, sir — give me a second."
+                         if status in ("loading", "downloading", "unloaded")
+                         else "I couldn't put a reply together just then, sir. Try me again?")
+            yield {"type": "sentence", "text": full_text}
 
+    _remember_turn("assistant", full_text)
+    print(f"  🤖 MARK: {full_text[:90]} ({time.time() - start:.2f}s)")
 
-# ─────────────────────────────────────────────
-# KEYWORD → TOOL mapping for reliable local dispatch
-# When the fast router misses and the LLM might hallucinate,
-# these keyword rules map intent directly to tools.
-# ─────────────────────────────────────────────
-
-_INTENT_MAP = [
-    # Screen / Vision
-    (re.compile(r"what'?s? on (?:my )?screen|analyze (?:my )?screen|look at (?:my )?screen|read (?:my )?screen|what (?:do you see|can you see)|describe (?:my )?screen", re.I), "analyze_screen", lambda _: {"query": "Describe what you see on the screen"}),
-    (re.compile(r"windows? (?:are )?open(?:ed)?|(?:open|running|current) (?:apps|windows|applications)|what(?:'s| is) (?:currently )?open|list (?:open )?windows|show (?:open )?windows|what (?:apps|windows) (?:do I|are)", re.I), "list_windows", lambda _: {}),
-
-    # System
-    (re.compile(r"system (?:stats|health|status|info)|cpu|ram usage|memory usage|disk usage|battery level|how is my (?:system|computer|mac)", re.I), "get_system_stats", lambda _: {}),
-    (re.compile(r"system info(?:rmation)?|mac info|computer info", re.I), "get_system_info", lambda _: {}),
-
-    # Screenshot
-    (re.compile(r"screenshot|screen capture|capture screen", re.I), "take_screenshot", lambda _: {}),
-
-    # Volume / Brightness
-    (re.compile(r"volume (\d+)|set volume (?:to )?(\d+)", re.I), "set_volume", lambda m: {"level": int(m.group(1) or m.group(2))}),
-    (re.compile(r"brightness (\d+)|set brightness (?:to )?(\d+)", re.I), "set_brightness", lambda m: {"level": int(m.group(1) or m.group(2))}),
-    (re.compile(r"\bmute\b", re.I), "mute_volume", lambda _: {}),
-    (re.compile(r"\bunmute\b", re.I), "unmute_volume", lambda _: {}),
-
-    # News / Search
-    (re.compile(r"news|headlines|briefing|what's happening|morning update", re.I), "get_news_briefing", lambda _: {"topic": ""}),
-    (re.compile(r"search (?:for |google |the web for )?(.+)", re.I), "web_search", lambda m: {"query": m.group(1).strip()}),
-    (re.compile(r"research (?:about |on |the topic of )?(.+)", re.I), "research_topic", lambda m: {"topic": m.group(1).strip()}),
-
-    # Memory / Reminders
-    (re.compile(r"(?:list|show|what) (?:are )?(?:my )?(?:all )?memories|what do you remember", re.I), "list_memories", lambda _: {}),
-    (re.compile(r"recall|remember what|what (?:is|was) my (.+)", re.I), "recall_memory", lambda m: {"query": m.group(1).strip() if m.lastindex else user_message}),
-    (re.compile(r"(?:list|show|what are) (?:my )?reminders", re.I), "list_reminders", lambda _: {}),
-    (re.compile(r"clear (?:all )?reminders", re.I), "clear_reminders", lambda _: {}),
-    (re.compile(r"remind me (?:to )?(.+?) (?:at|in|on|tomorrow) (.+)", re.I), "set_reminder", lambda m: {"message": m.group(1).strip(), "time_str": m.group(2).strip()}),
-
-    # Clipboard
-    (re.compile(r"clipboard|what did I copy", re.I), "get_clipboard_history", lambda _: {}),
-
-    # Context
-    (re.compile(r"what (?:am I|app is) (?:looking at|in|using)|get context|what (?:page|tab|website) (?:am I|is) (?:on|open)", re.I), "get_context", lambda _: {}),
-
-    # Routines
-    (re.compile(r"(?:list|show|what) (?:are )?(?:all )?routines|what modes", re.I), "list_routines", lambda _: {}),
-
-    # Code / Build
-    (re.compile(r"(?:write|create|generate|make) (?:me )?(?:a )?(.+?) (?:script|program|code|function)(?: in (\w+))?", re.I), "write_code", lambda m: {"description": m.group(1).strip(), "language": m.group(2) or "python"}),
-    (re.compile(r"(?:make|build|create|generate) (?:me )?(?:a )?(.+?) (?:website|site|page|webpage)", re.I), "build_website", lambda m: {"description": m.group(1).strip() + " website"}),
-
-    # Window management
-    (re.compile(r"(?:focus|switch to|bring up) (.+)", re.I), "focus_app", lambda m: {"app_name": m.group(1).strip()}),
-    (re.compile(r"(?:open|launch|start) (?:the )?(?:app )?(.+?)(?:\s+app)?$", re.I), "open_app", lambda m: {"app_name": m.group(1).strip()}),
-    (re.compile(r"(?:open|go to|visit) ((?:https?://)?(?:www\.)?[\w.-]+\.\w{2,}(?:/\S*)?)", re.I), "open_website", lambda m: {"url": m.group(1).strip()}),
-
-    # Music
-    (re.compile(r"play (.+)", re.I), "play_music", lambda m: {"query": m.group(1).strip(), "platform": "youtube"}),
-
-    # Vision click
-    (re.compile(r"(?:click|press|tap)(?: on)? (?:the )?(.+?)(?:\s+button|\s+icon|\s+link)?$", re.I), "vision_click", lambda m: {"instruction": m.group(1).strip()}),
-
-    # Power
-    (re.compile(r"\bsleep\b", re.I), "system_sleep", lambda _: {}),
-    (re.compile(r"\bshutdown\b|\bshut down\b", re.I), "system_shutdown", lambda _: {}),
-    (re.compile(r"\brestart\b|reboot", re.I), "system_restart", lambda _: {}),
-
-    # Clean up
-    (re.compile(r"clean (?:my )?(?:the )?desktop|organize (?:my )?desktop|tidy (?:(?:up )?(?:my )?)?desktop", re.I), "clean_desktop", lambda _: {}),
-
-    # Password
-    (re.compile(r"generate (?:a )?(?:strong |secure )?password", re.I), "generate_password", lambda _: {}),
-]
-
-
-def _dispatch_by_intent(user_message):
-    """
-    Try to map a user message to a tool call via keyword intent matching.
-    Returns tool result dict or None.
-    """
-    for pattern, tool_name, arg_extractor in _INTENT_MAP:
-        match = pattern.search(user_message)
-        if match:
-            try:
-                args = arg_extractor(match)
-                result = execute_tool(tool_name, args)
-                result_str = str(result) if result else ""
-                print(f"  🎯 Intent routed: {tool_name}({args}) → {result_str[:80]}")
-                return {
-                    "text": result_str,
-                    "tool_calls": [{"name": tool_name, "result": result_str}],
-                }
-            except Exception as e:
-                print(f"  ✗ Intent dispatch failed {tool_name}: {e}")
-                return None
-    return None
-
-
-def _handle_local_response(messages, user_message):
-    """Handle response via local Gemma 2 2B.
-
-    Priority:
-    1. Intent dispatch (keyword → tool) for action commands
-    2. LLM for pure conversational/reasoning responses
-    """
-    global conversation_history
-
-    from core.local_llm import local_chat
-
-    # ── Step 1: Try to execute the right tool by intent ──
-    intent_result = _dispatch_by_intent(user_message)
-    if intent_result:
-        conversation_history.append({"role": "assistant", "content": intent_result["text"]})
-        return intent_result
-
-    # ── Step 2: Call local LLM for conversation/reasoning ──
-    # Use a compact, Gemma-friendly prompt — no tool instructions (avoids hallucination)
-    slim_messages = []
-    system_injected = False
-    for msg in messages:
-        role = msg.get("role", "user")
-        content = msg.get("content", "")
-        if not content:
-            continue
-        if role == "system":
-            # Inject only the key personality traits, strip 95% of the prompt
-            if not system_injected:
-                slim_messages.append({
-                    "role": "user",
-                    "content": (
-                        "You are MARK, a smart AI system controller assistant for macOS. "
-                        "You are helpful, concise, and address the user as 'sir'. "
-                        "Answer the user's question directly.\n\n"
-                        + user_message
-                    )
-                })
-                system_injected = True
-        elif role in ("user", "assistant"):
-            if not system_injected:
-                slim_messages.append({"role": role, "content": content})
-            # Skip after injecting (message already included above)
-
-    if not slim_messages:
-        slim_messages = [{"role": "user", "content": user_message}]
-
-    text = local_chat(slim_messages, max_tokens=512, temperature=0.7)
-
-    if text is None:
-        error_msg = "Local model is loading or unavailable, sir. Please wait a moment."
-        conversation_history.append({"role": "assistant", "content": error_msg})
-        return {"text": error_msg, "tool_calls": None}
-
-    conversation_history.append({"role": "assistant", "content": text})
-    return {"text": text, "tool_calls": None}
-
+    yield {"type": "done", "text": full_text, "tool_calls": tool_calls}

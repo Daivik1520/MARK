@@ -71,10 +71,50 @@ def tile_windows(app1: str, app2: str, layout: str = "side-by-side") -> str:
 
 
 def focus_app(app_name: str) -> str:
-    """Bring an application to the front."""
-    script = f'tell application "{app_name}" to activate'
+    """Bring an application to the front screen, unminimizing and unhiding if needed."""
+    import subprocess
+    aliases = {
+        "vscode": "Visual Studio Code",
+        "visual studio code": "Visual Studio Code",
+        "code": "Visual Studio Code",
+        "terminal": "Terminal",
+        "finder": "Finder",
+        "chrome": "Google Chrome",
+        "google chrome": "Google Chrome",
+        "safari": "Safari",
+        "spotify": "Spotify",
+        "calculator": "Calculator",
+        "notes": "Notes",
+        "settings": "System Settings",
+        "system settings": "System Settings",
+        "textedit": "TextEdit",
+    }
+    target = aliases.get(app_name.lower().strip(), app_name.strip())
+
+    script = f'''
+    tell application "{target}"
+        reopen
+        activate
+    end tell
+
+    tell application "System Events"
+        try
+            set proc to first process whose (name is "{target}" or title is "{target}")
+            set visible of proc to true
+            set frontmost of proc to true
+            tell proc
+                repeat with w in windows
+                    try
+                        set value of attribute "AXMinimized" of w to false
+                    end try
+                end repeat
+            end tell
+        end try
+    end tell
+    '''
     _run_apple(script)
-    return f"✅ Focused {app_name}."
+    subprocess.run(["open", "-a", target], stderr=subprocess.DEVNULL)
+    return f"Brought {target} to the front screen, sir."
 
 
 def maximize_window(app_name: str) -> str:

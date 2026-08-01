@@ -10,7 +10,8 @@ import subprocess
 import requests
 
 
-MARK_API = "http://localhost:5001/api/command"
+PORT = os.getenv("PORT", "5050")
+MARK_API = f"http://localhost:{PORT}/api/command"
 
 
 def _send_command(command):
@@ -73,21 +74,23 @@ def _handle_palette_command():
 
 
 def _start_hotkey_listener():
-    """Listen for Option+Space global hotkey."""
+    """Listen for the Option+Space global hotkey."""
     try:
         from pynput import keyboard
 
-        # Track which keys are pressed
         pressed = set()
 
         def on_press(key):
             pressed.add(key)
-            # Check for Command + Space
             try:
-                if (keyboard.Key.cmd in pressed or keyboard.Key.cmd_l in pressed or keyboard.Key.cmd_r in pressed):
-                    if key == keyboard.Key.space:
-                        # Run in separate thread to not block listener
-                        threading.Thread(target=_handle_palette_command, daemon=True).start()
+                # Option (Alt) + Space. Deliberately not Command+Space, which
+                # macOS reserves for Spotlight.
+                option_down = (keyboard.Key.alt in pressed
+                               or keyboard.Key.alt_l in pressed
+                               or keyboard.Key.alt_r in pressed)
+                if option_down and key == keyboard.Key.space:
+                    pressed.discard(keyboard.Key.space)
+                    threading.Thread(target=_handle_palette_command, daemon=True).start()
             except Exception:
                 pass
 
@@ -155,13 +158,75 @@ def _start_menubar():
 
 
 def start_palette():
-    """Start the command palette (hotkey + menubar, both in background threads)."""
-    # Start hotkey listener
-    _start_hotkey_listener()
+    """
+    Run the palette. Blocks — rumps owns the thread it runs on.
 
-    # Start menubar app in background thread
-    # rumps needs to run in main thread on macOS, so we run it in a daemon thread
-    # with NSApplication workaround
-    menubar_thread = threading.Thread(target=_start_menubar, daemon=True)
-    menubar_thread.start()
-    print("  🎯 Command Palette started (menubar + Option+Space hotkey)")
+    This must be the main thread of its process: AppKit aborts if an
+    NSApplication event loop is started anywhere else. That is why the server
+    launches this as a separate process rather than a thread.
+    """
+    _start_hotkey_listener()
+    _start_menubar()
+
+
+# ─────────────────────────────────────────────
+# DETACHED LAUNCH (used by app.py)
+# ─────────────────────────────────────────────
+
+_child = None
+
+
+def launch_detached(port=None):
+    """
+    Start the palette as its own process.
+
+    uvicorn owns the server's main thread, and rumps needs a main thread of its
+    own, so the two cannot coexist in one process — the previous build simply
+    disabled the palette to avoid the crash.
+    """
+    global _child
+    import sys
+
+    if _child and _child.poll() is None:
+        return _child
+
+    env = os.environ.copy()
+    if port:
+        env["PORT"] = str(port)
+    env["MARK_PALETTE_CHILD"] = "1"
+
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    try:
+        _child = subprocess.Popen(
+            [sys.executable, "-m", "services.command_palette"],
+            cwd=project_root,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        print("  🎯 Command palette running (menubar + Option+Space)")
+        return _child
+    except Exception as e:
+        print(f"  ⚠️  Command palette could not start: {e}")
+        return None
+
+
+def stop_detached():
+    """Terminate the palette process, if we started one."""
+    global _child
+    if _child and _child.poll() is None:
+        try:
+            _child.terminate()
+            _child.wait(timeout=3)
+        except Exception:
+            try:
+                _child.kill()
+            except Exception:
+                pass
+    _child = None
+
+
+if __name__ == "__main__":
+    start_palette()

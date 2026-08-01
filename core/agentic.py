@@ -1,239 +1,257 @@
 """
-MARK — Agentic Loop Engine
-Multi-step autonomous task execution. The AI keeps calling tools
-until the task is complete or the step limit is reached.
-Uses local Gemma 2 2B via llama-cpp-python.
+MARK — Agent Loop (Plan → Act → Verify → Reflect)
+
+Multi-step autonomous execution for requests that a single tool call cannot
+satisfy ("download the report, summarise it, and save the summary to my desk").
+
+Two things make this different from the previous implementation:
+
+  * It speaks the same constrained-decoding protocol as the chat path. There
+    used to be two incompatible tool syntaxes — free-text `TOOL_CALL: name({})`
+    here and JSON over there — so fixing one never fixed the other.
+
+  * Each step observes the actual tool output before choosing the next one,
+    and the loop ends when the model says it is finished rather than when a
+    regex stops matching.
 """
 
-import os
-import json
-import time
 import re
+import time
+import json
 import hashlib
-from dotenv import load_dotenv
 
-load_dotenv()
+from core.tool_schemas import TOOLS_BY_NAME
+from core.tool_router import select_tools
+from core.tool_executor import run_tool
+
+DONE = "task_complete"
+
+# Requests with several dependent actions. Deliberately narrower than the old
+# trigger list, which fired on bare words like "next" and "first".
+_MULTI_STEP = re.compile(
+    r"\b(?:and then|after that|once (?:that|you)|followed by|"
+    r"step by step|for each|one by one|"
+    r"then (?:save|send|open|write|move|delete|summar|upload|run|copy)\w*)\b",
+    re.I,
+)
+_PROJECT_SCALE = re.compile(
+    r"\b(?:set up (?:a|an|my)|create a (?:project|repo|repository)|"
+    r"build me (?:a|an)|scaffold|bootstrap (?:a|an)|"
+    r"download and|research .{0,40} and (?:write|save|summar))\b",
+    re.I,
+)
+
+
+def should_use_agent(text):
+    """Heuristic gate: is this a genuine multi-step task?"""
+    if not text:
+        return False
+    if _MULTI_STEP.search(text) or _PROJECT_SCALE.search(text):
+        return True
+    # Three or more imperative clauses chained with commas/and.
+    clauses = [c for c in re.split(r",|\band\b", text, flags=re.I) if c.strip()]
+    if len(clauses) >= 3:
+        verbs = sum(
+            1 for c in clauses
+            if re.match(r"\s*(?:open|create|write|save|send|move|delete|run|search|"
+                        r"download|install|summar|copy|make|build|find)\w*\b", c.strip(), re.I)
+        )
+        return verbs >= 2
+    return False
 
 
 # ─────────────────────────────────────────────
-# AGENTIC SYSTEM PROMPT EXTENSION
+# PLANNING
 # ─────────────────────────────────────────────
 
-AGENTIC_PROMPT_PREFIX = """You are in AGENTIC MODE. You have the ability to call multiple tools in sequence to complete complex, multi-step tasks autonomously.
-
-RULES FOR AGENTIC MODE:
-1. After each tool result, analyze whether the task is FULLY complete. If not, call the next appropriate tool.
-2. When the task is fully complete, respond with a concise final summary — do NOT call any more tools.
-3. Think step-by-step. Break complex tasks into smaller operations.
-4. If a tool fails, analyze the error and try an alternative approach. Do not repeat the same failing call.
-5. You can call multiple tools in a single turn if they are independent of each other.
-6. Use run_terminal for shell commands, read_file to inspect files, write_file to create files, and edit_file to modify them.
-7. Always verify your work — after creating/modifying files, read them back to confirm. After running commands, check the output.
-8. If you need information to proceed, use the appropriate tool to gather it first.
-9. Keep the user informed with brief status notes between tool calls.
-10. STOP when the task is done. Do not over-engineer or add unrequested features.
-
-When you need to use a tool, output EXACTLY this format on its own line:
-TOOL_CALL: tool_name({"param": "value"})
-
-After the TOOL_CALL line, write your response to the user.
-If no tool is needed, just respond normally.
-
-"""
-
-
-# ─────────────────────────────────────────────
-# AGENTIC LOOP
-# ─────────────────────────────────────────────
-
-def run_agentic_task(task, max_steps=15, on_step=None):
-    """
-    Execute a multi-step task using an agentic loop.
-    The AI calls tools repeatedly until the task is complete.
-
-    Args:
-        task: Natural language description of what to accomplish
-        max_steps: Maximum number of LLM call iterations (default 15)
-        on_step: Optional callback(step_num, step_info_dict) for progress
-
-    Returns:
-        {
-            "text": str,           # Final response text
-            "steps": list,         # List of step records
-            "tool_calls": list,    # Flat list of all tool calls
-            "completed": bool,     # Whether task completed naturally
-            "total_time": float,   # Total execution time
-            "step_count": int      # Number of steps taken
-        }
-    """
-    from core.ai_engine import TOOLS, SYSTEM_PROMPT
+def get_agentic_plan(task):
+    """Produce a numbered plan without executing anything."""
     from core.local_llm import local_chat
-    from core.system_controller import execute_tool
 
-    start_time = time.time()
-    steps = []
-    all_tool_calls = []
+    candidates = select_tools(task, max_tools=18)
+    names = ", ".join(t["function"]["name"] for t in candidates)
 
-    # Build enhanced system prompt with tool names
-    tool_names = [t["function"]["name"] for t in TOOLS]
-    tool_instruction = (
-        "\n\nIMPORTANT — TOOL CALLING:\n"
-        "When you need to perform a system action, output EXACTLY this format on its own line:\n"
-        "TOOL_CALL: tool_name({\"param\": \"value\"})\n\n"
-        "Available tools: " + ", ".join(tool_names) + "\n"
-        "After the TOOL_CALL line, write your response to the user.\n"
-        "If no tool is needed, just respond normally.\n"
+    prompt = (
+        "You plan tasks for a Mac assistant.\n"
+        f"Tools you may use: {names}\n\n"
+        f"Task: {task}\n\n"
+        "Write a short numbered plan. One line per step, naming the tool and "
+        "what it does. Maximum six steps. Do not execute anything."
+    )
+    result = local_chat([{"role": "user", "content": prompt}],
+                        max_tokens=400, temperature=0.3)
+    return result or "Could not generate a plan."
+
+
+# ─────────────────────────────────────────────
+# THE LOOP
+# ─────────────────────────────────────────────
+
+def _choose_step(task, transcript, used_tools):
+    """Pick the next tool (or DONE), constrained to real tool names."""
+    from core.local_llm import local_chat_choice
+
+    query = task + " " + " ".join(used_tools)
+    candidates = select_tools(query, max_tools=16, extra=used_tools)
+    options = [t["function"]["name"] for t in candidates] + [DONE]
+
+    lines = []
+    for tool in candidates:
+        fn = tool["function"]
+        lines.append(f"- {fn['name']}: {fn.get('description', '').split('. ')[0]}")
+
+    history = "\n".join(transcript[-8:]) if transcript else "(nothing yet)"
+
+    prompt = (
+        "You are executing a multi-step task on a Mac, one tool at a time.\n\n"
+        "Tools:\n" + "\n".join(lines) + "\n\n"
+        f"Choose \"{DONE}\" when the task is fully accomplished, or when the "
+        "remaining work cannot be done with these tools.\n"
+        "Reply with one tool name only.\n\n"
+        f"TASK: {task}\n\n"
+        f"WHAT HAS HAPPENED SO FAR:\n{history}\n\n"
+        "Next tool:"
     )
 
-    full_system = AGENTIC_PROMPT_PREFIX + SYSTEM_PROMPT + tool_instruction
+    choice = local_chat_choice([{"role": "user", "content": prompt}], options)
+    return choice or DONE
 
-    # Build initial messages (local to this run)
-    messages = [
-        {"role": "system", "content": full_system},
-        {"role": "user", "content": task},
-    ]
 
-    # Duplicate call detection
-    _recent_calls = []
+def _build_step_args(tool_name, task, transcript):
+    """Constrained argument generation for one step."""
+    from core.local_llm import local_chat_json
 
-    final_text = ""
+    tool = TOOLS_BY_NAME.get(tool_name)
+    if not tool:
+        return {}
+    params = tool["function"].get("parameters", {}) or {}
+    props = params.get("properties", {}) or {}
+    if not props:
+        return {}
+
+    schema = {
+        "type": "object",
+        "properties": {k: {"type": v.get("type", "string")} for k, v in props.items()},
+        "required": list(params.get("required", [])),
+        "additionalProperties": False,
+    }
+    param_help = "\n".join(f"  {k}: {v.get('description','')}" for k, v in props.items())
+    history = "\n".join(transcript[-6:]) if transcript else "(nothing yet)"
+
+    prompt = (
+        f"TASK: {task}\n\n"
+        f"PROGRESS SO FAR:\n{history}\n\n"
+        f"You are now calling: {tool_name}\n"
+        f"{tool['function'].get('description','')}\n\n"
+        f"Parameters:\n{param_help}\n\n"
+        "Give the parameter values for this step. Use real values from the task "
+        "and from what previous steps returned.\n"
+        "This is a Mac. Paths look like ~/Desktop/notes.txt or ~/Documents/work "
+        "— never C:\\ and never a placeholder username.\n"
+        "Reply with JSON only."
+    )
+    args = local_chat_json([{"role": "user", "content": prompt}], schema, max_tokens=320)
+    if not isinstance(args, dict):
+        return {}
+    return {k: v for k, v in args.items() if v not in ("", None)}
+
+
+def run_agentic_task(task, max_steps=10, on_step=None, allow_sensitive=False):
+    """
+    Execute a multi-step task.
+
+    allow_sensitive — when False (the default), sensitive tools still require
+    the user's confirmation, and the loop stops to ask rather than pushing on.
+
+    Returns a dict with text, steps, tool_calls, completed, total_time,
+    step_count.
+    """
+    start = time.time()
+    transcript = []
+    steps = []
+    all_calls = []
+    used_tools = []
+    seen = []
     completed = False
+    final_text = ""
 
     for step_num in range(1, max_steps + 1):
-        step_start = time.time()
-        step_record = {
+        tool_name = _choose_step(task, transcript, used_tools)
+
+        if tool_name == DONE:
+            completed = True
+            break
+
+        args = _build_step_args(tool_name, task, transcript)
+
+        # Loop guard — identical call three times means we are stuck.
+        sig = (tool_name, hashlib.md5(json.dumps(args, sort_keys=True, default=str).encode()).hexdigest())
+        if seen.count(sig) >= 2:
+            transcript.append(f"Step {step_num}: {tool_name} repeated with identical arguments — stopping.")
+            break
+        seen.append(sig)
+
+        print(f"  🔧 Step {step_num}: {tool_name}({json.dumps(args, default=str)[:100]})")
+        result = run_tool(tool_name, args, allow_sensitive=allow_sensitive)
+        result_str = str(result)
+        print(f"     → {result_str[:100]}")
+
+        if tool_name not in used_tools:
+            used_tools.append(tool_name)
+
+        transcript.append(f"Step {step_num}: {tool_name}({json.dumps(args, default=str)[:120]}) → {result_str[:300]}")
+
+        record = {
             "step": step_num,
-            "tool_calls": [],
-            "ai_text": None,
+            "tool_calls": [{"name": tool_name, "args": args, "result": result_str}],
+            "ai_text": f"{tool_name} → {result_str[:120]}",
             "timestamp": time.time(),
         }
-
-        # Call local LLM
-        text = local_chat(messages, max_tokens=1024, temperature=0.3)
-
-        if text is None:
-            step_record["ai_text"] = "ERROR: Local LLM call failed."
-            steps.append(step_record)
-            final_text = "I encountered an error with the local model, sir."
-            break
-
-        # Parse tool calls from response
-        tool_call_match = re.search(r'TOOL_CALL:\s*(\w+)\((.*)\)', text)
-
-        if tool_call_match:
-            func_name = tool_call_match.group(1)
-            args_str = tool_call_match.group(2).strip()
-
-            try:
-                func_args = json.loads(args_str) if args_str else {}
-            except json.JSONDecodeError:
-                func_args = {}
-
-            # Duplicate detection
-            args_hash = hashlib.md5(json.dumps(func_args, sort_keys=True).encode()).hexdigest()
-            call_sig = (func_name, args_hash)
-            dup_count = sum(1 for c in _recent_calls[-6:] if c == call_sig)
-
-            if dup_count >= 2:
-                result = f"LOOP DETECTED: Tool '{func_name}' called with same arguments 3 times. Stopping."
-                step_record["tool_calls"].append({"name": func_name, "args": func_args, "result": result})
-                all_tool_calls.append({"name": func_name, "args": func_args, "result": result})
-                messages.append({"role": "assistant", "content": text})
-                messages.append({"role": "user", "content": "SYSTEM: Loop detected. Summarize what you've accomplished so far and stop."})
-                _recent_calls.append(call_sig)
-                steps.append(step_record)
-                continue
-
-            _recent_calls.append(call_sig)
-
-            # Execute the tool
-            print(f"  🔧 Step {step_num}: {func_name}({json.dumps(func_args)[:100]})")
-            try:
-                result = execute_tool(func_name, func_args)
-            except Exception as e:
-                result = f"TOOL ERROR: {type(e).__name__}: {str(e)}"
-
-            result_str = str(result) if result else "Tool returned no output."
-            print(f"  ✓ Result: {result_str[:100]}")
-
-            step_record["tool_calls"].append({"name": func_name, "args": func_args, "result": result_str})
-            all_tool_calls.append({"name": func_name, "args": func_args, "result": result_str})
-
-            # Clean text and add to messages
-            clean_text = re.sub(r'TOOL_CALL:.*\n?', '', text).strip()
-            step_record["ai_text"] = clean_text
-
-            messages.append({"role": "assistant", "content": text})
-            messages.append({"role": "user", "content": f"Tool result from {func_name}: {result_str[:500]}\n\nContinue with the task. If done, give a final summary."})
-
-        else:
-            # No tool calls — AI is done
-            final_text = text or "Task completed, sir."
-            step_record["ai_text"] = final_text
-            completed = True
-            steps.append(step_record)
-
-            if on_step:
-                try:
-                    on_step(step_num, step_record)
-                except Exception:
-                    pass
-            break
-
-        steps.append(step_record)
+        steps.append(record)
+        all_calls.append({"name": tool_name, "args": args, "result": result_str})
 
         if on_step:
             try:
-                on_step(step_num, step_record)
+                on_step(step_num, record)
             except Exception:
                 pass
 
-    # If we exhausted max_steps without completion
-    if not completed and not final_text:
-        final_text = f"Task reached the maximum of {max_steps} steps. Here's what was accomplished."
-        messages.append({"role": "user", "content": "SYSTEM: Step limit reached. Give a brief summary of what was accomplished."})
-        summary = local_chat(messages, max_tokens=512, temperature=0.3)
-        if summary:
-            final_text = summary
+        # A sensitive tool parked itself waiting for approval — stop and ask.
+        if "needs your go-ahead" in result_str:
+            final_text = result_str
+            break
 
-    total_time = round(time.time() - start_time, 2)
+    if not final_text:
+        final_text = _summarise(task, transcript, completed)
 
     return {
         "text": final_text,
         "steps": steps,
-        "tool_calls": all_tool_calls,
+        "tool_calls": all_calls,
         "completed": completed,
-        "total_time": total_time,
+        "total_time": round(time.time() - start, 2),
         "step_count": len(steps),
     }
 
 
-# ─────────────────────────────────────────────
-# PLANNING (preview without execution)
-# ─────────────────────────────────────────────
-
-def get_agentic_plan(task):
-    """
-    Ask the AI to create a step-by-step plan for a task WITHOUT executing it.
-    """
-    from core.ai_engine import SYSTEM_PROMPT
+def _summarise(task, transcript, completed):
+    """Turn the transcript into one or two spoken sentences."""
     from core.local_llm import local_chat
+    from core.ai_engine import get_system_prompt, _clean_response
 
-    plan_prompt = (
-        "Create a detailed step-by-step plan for this task. "
-        "List each step with the specific tool you would call and why. "
-        "Do NOT execute anything — just plan. "
-        "Format as a numbered list. Be specific about parameters.\n\n"
-        f"Task: {task}"
+    if not transcript:
+        return "I couldn't find a way to start that one, sir."
+
+    history = "\n".join(transcript[-10:])
+    prompt = (
+        f"{get_system_prompt()}\n\n"
+        f"He asked you to: {task}\n\n"
+        f"Here is what you actually did:\n{history}\n\n"
+        + ("Tell him it's done and what the outcome was, in one or two short "
+           "spoken sentences." if completed else
+           "Tell him how far you got and what stopped you, in one or two short "
+           "spoken sentences.")
+        + " No markdown, no tool names, no step numbers."
     )
-
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": plan_prompt},
-    ]
-
-    try:
-        result = local_chat(messages, max_tokens=2048, temperature=0.3)
-        return result or "Could not generate a plan."
-    except Exception as e:
-        return f"Error generating plan: {e}"
+    text = local_chat([{"role": "user", "content": prompt}], max_tokens=180, temperature=0.5)
+    return _clean_response(text) if text else "That's done, sir."

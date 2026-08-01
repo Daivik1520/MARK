@@ -2,7 +2,7 @@
 # ═══════════════════════════════════════════════
 #  M.A.R.K. — One-Click Setup & Run
 #  Machine Augmented Reality Kernel
-#  100% Local AI — Gemma 2 2B (Metal GPU)
+#  100% Local AI — Gemma 3 4B (Metal GPU)
 # ═══════════════════════════════════════════════
 
 set -e
@@ -19,7 +19,7 @@ echo -e "${ORANGE}${BOLD}"
 echo "    ╔══════════════════════════════════════╗"
 echo "    ║         M.A.R.K. SETUP               ║"
 echo "    ║    Machine Augmented Reality Kernel   ║"
-echo "    ║    🧠 Local Gemma 2 2B (GPU)          ║"
+echo "    ║    🧠 Gemma 3 4B (Metal GPU)        ║"
 echo "    ╚══════════════════════════════════════╝"
 echo -e "${NC}"
 
@@ -57,11 +57,13 @@ python3 -m playwright install chromium 2>/dev/null && \
     echo -e "  ${GREEN}✓${NC} Chromium browser ready" || \
     echo -e "  ${ORANGE}⚠${NC} Playwright setup skipped (browser features may not work)"
 
+PORT=${PORT:-3000}
+
 # ─── Kill existing MARK if running ───
-if lsof -ti:5001 &>/dev/null; then
+if lsof -ti:$PORT &>/dev/null; then
     echo ""
-    echo -e "  ${ORANGE}⚠${NC} Port 5001 already in use — stopping old instance..."
-    lsof -ti:5001 | xargs kill -9 2>/dev/null
+    echo -e "  ${ORANGE}⚠${NC} Port $PORT already in use — stopping old instance..."
+    lsof -ti:$PORT | xargs kill -9 2>/dev/null
     sleep 1
 fi
 
@@ -72,10 +74,10 @@ echo ""
 echo -e "${ORANGE}${BOLD}"
 echo "    ╔══════════════════════════════════════╗"
 echo "    ║         M.A.R.K. IS LIVE             ║"
-echo "    ║     http://localhost:5001             ║"
-echo "    ║     🧠 Gemma 2 2B (Local GPU)        ║"
+echo "    ║     http://localhost:$PORT             ║"
+echo "    ║     🧠 Gemma 3 4B (Metal GPU)      ║"
 echo "    ║     Press Ctrl+C to stop             ║"
 echo "    ╚══════════════════════════════════════╝"
 echo -e "${NC}"
 
-python3 app.py
+PORT=$PORT python3 app.py

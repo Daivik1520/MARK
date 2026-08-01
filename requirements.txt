@@ -1,22 +1,40 @@
-flask
-flask-socketio
-requests
-edge-tts
-python-dotenv
-pyautogui
-Pillow
-psutil
-playwright
+# ── Server ──
 fastapi
 uvicorn[standard]
 python-socketio
-beautifulsoup4
-lxml
-pynput
-rumps
-phonenumbers
 python-multipart
+python-dotenv
+requests
+
+# ── Local inference (Metal GPU) ──
 llama-cpp-python
 huggingface-hub
-mcp
+
+# ── Speech synthesis ──
+edge-tts
+
+# ── macOS control & perception ──
+# pyobjc-framework-Vision powers on-device OCR, and ApplicationServices gives
+# us the accessibility tree. Together they replace the Tesseract dependency the
+# vision tools used to need.
+pyobjc-framework-Cocoa
+pyobjc-framework-Quartz
+pyobjc-framework-Vision
+pyobjc-framework-ApplicationServices
+pyobjc-framework-Speech
+pyautogui
+pyperclip
+pynput
+rumps
+psutil
+
+# ── Tools ──
+Pillow
+beautifulsoup4
+lxml
+playwright
+phonenumbers
+
+# ── Memory & integrations ──
 chromadb
+mcp

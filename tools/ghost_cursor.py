@@ -144,108 +144,32 @@ def drag_to(start_x, start_y, end_x, end_y):
 
 def click_text(text):
     """
-    Find text on screen using OCR and click on it.
-    Uses macOS screencapture + Vision framework.
+    Find text on screen and click it.
 
-    Args:
-        text: Text to find and click on screen
+    Delegates to core.screen_sense, which uses the accessibility tree first and
+    Apple's Vision OCR second. The previous implementation compiled a Swift
+    program at call time, which meant every click depended on the Xcode
+    toolchain being installed and on a ~1s compile.
     """
     if not text:
-        return "❌ No text specified."
+        return "Tell me what to click, sir."
 
-    text_lower = text.lower().strip()
+    from core import screen_sense
 
-    # Take screenshot
-    tmp_path = "/tmp/mark_ghost_screenshot.png"
-    subprocess.run(["screencapture", "-x", tmp_path], timeout=5)
+    elements = screen_sense.element_map()
+    if not elements:
+        if not screen_sense.capture_available():
+            return screen_sense.PERMISSION_HINT
+        return "I couldn't read anything on screen, sir."
 
-    if not os.path.exists(tmp_path):
-        return "❌ Could not take screenshot."
+    element = screen_sense.find_element(text, elements)
+    if not element:
+        visible = ", ".join(e["label"] for e in elements[:8])
+        return f"I couldn't find '{text}' on screen, sir. What I can see: {visible}"
 
-    # Use macOS Vision framework via Swift for OCR
-    swift_code = f'''
-import Foundation
-import Vision
-import AppKit
+    pyautogui.click(element["x"], element["y"])
+    return f"Clicked '{element['label']}', sir."
 
-let imagePath = "{tmp_path}"
-guard let image = NSImage(contentsOfFile: imagePath),
-      let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {{
-    print("ERROR:NO_IMAGE")
-    exit(1)
-}}
-
-let request = VNRecognizeTextRequest()
-request.recognitionLevel = .accurate
-request.usesLanguageCorrection = true
-
-let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-try handler.perform([request])
-
-guard let observations = request.results else {{
-    print("ERROR:NO_RESULTS")
-    exit(1)
-}}
-
-let searchText = "{text_lower}"
-let imageWidth = Double(cgImage.width)
-let imageHeight = Double(cgImage.height)
-
-for observation in observations {{
-    guard let candidate = observation.topCandidates(1).first else {{ continue }}
-    let found = candidate.string.lowercased()
-    if found.contains(searchText) {{
-        let box = observation.boundingBox
-        // Vision uses bottom-left origin, convert to top-left
-        let centerX = Int((box.origin.x + box.width / 2) * imageWidth)
-        let centerY = Int((1.0 - (box.origin.y + box.height / 2)) * imageHeight)
-        print("FOUND:\\(centerX),\\(centerY)")
-        exit(0)
-    }}
-}}
-
-print("NOT_FOUND")
-'''
-
-    swift_path = "/tmp/mark_ocr.swift"
-    with open(swift_path, "w") as f:
-        f.write(swift_code)
-
-    try:
-        result = subprocess.run(
-            ["swift", swift_path],
-            capture_output=True, text=True, timeout=10,
-        )
-        output = result.stdout.strip()
-
-        if output.startswith("FOUND:"):
-            coords = output.split(":")[1]
-            cx, cy = coords.split(",")
-            cx, cy = int(cx), int(cy)
-
-            # Account for Retina display scaling (2x)
-            scale = _get_display_scale()
-            cx = int(cx / scale)
-            cy = int(cy / scale)
-
-            pyautogui.click(cx, cy)
-            return f"🖱️ Found '{text}' and clicked at ({cx}, {cy})"
-        elif output == "NOT_FOUND":
-            return f"❌ Could not find '{text}' on screen."
-        else:
-            return f"❌ OCR error: {output}"
-
-    except subprocess.TimeoutExpired:
-        return "❌ OCR timed out."
-    except Exception as e:
-        return f"❌ OCR error: {str(e)}"
-    finally:
-        # Cleanup
-        for f in [tmp_path, swift_path]:
-            try:
-                os.remove(f)
-            except OSError:
-                pass
 
 
 def _get_display_scale():

@@ -19,3 +19,9 @@ rag_data/
 *.log
 .DS_Store
 __pycache__/
+
+# Runtime state — contains personal data
+clipboard_history.json
+tools/clipboard_history.json
+audit/
+evals/__pycache__/

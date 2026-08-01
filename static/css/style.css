@@ -1973,3 +1973,403 @@ body {
     color: var(--text-2);
     font-weight: 500;
 }
+
+
+/* ════════════════════════════════════════
+   IoT & VIRTUAL MOUSE CONTROLLER HUD
+   ════════════════════════════════════════ */
+
+.topbar-btn--iot {
+    background: linear-gradient(135deg, rgba(255, 106, 0, 0.2), rgba(255, 170, 0, 0.1));
+    border-color: rgba(255, 106, 0, 0.4);
+    color: var(--accent);
+}
+.topbar-btn--iot:hover {
+    background: linear-gradient(135deg, rgba(255, 106, 0, 0.35), rgba(255, 170, 0, 0.2));
+    box-shadow: 0 0 12px rgba(255, 106, 0, 0.3);
+}
+
+.modal--wide {
+    max-width: 850px;
+    width: 90vw;
+}
+
+.hud-tabs {
+    display: flex;
+    gap: 10px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 12px;
+    margin-bottom: 18px;
+}
+
+.hud-tab {
+    padding: 8px 16px;
+    background: var(--surface-3);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    color: var(--text-2);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s var(--ease);
+}
+
+.hud-tab:hover {
+    background: var(--surface-4);
+    color: var(--text-1);
+}
+
+.hud-tab.active {
+    background: linear-gradient(135deg, rgba(255, 90, 0, 0.2), rgba(255, 140, 0, 0.1));
+    color: var(--accent);
+    border-color: var(--accent);
+}
+
+.hud-tab-content {
+    display: none;
+}
+.hud-tab-content.active {
+    display: block;
+}
+
+/* Virtual Mouse Layout */
+.vmouse-layout {
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+}
+
+.vmouse-touchpad-box {
+    flex: 1;
+    min-width: 280px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.vmouse-touchpad {
+    position: relative;
+    height: 260px;
+    background: radial-gradient(circle at center, rgba(255, 90, 0, 0.05), rgba(15, 15, 25, 0.9));
+    border: 2px dashed rgba(255, 106, 0, 0.3);
+    border-radius: var(--r-lg);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: crosshair;
+    overflow: hidden;
+    touch-action: none;
+    user-select: none;
+}
+
+.vmouse-touchpad:active {
+    border-color: var(--accent);
+    background: radial-gradient(circle at center, rgba(255, 90, 0, 0.1), rgba(15, 15, 25, 0.95));
+}
+
+.vmouse-cursor-dot {
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    background: var(--accent);
+    border: 2px solid #fff;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    box-shadow: 0 0 12px var(--accent);
+    pointer-events: none;
+    transition: left 0.05s ease-out, top 0.05s ease-out;
+}
+
+.vmouse-hint {
+    font-size: 12px;
+    color: var(--text-3);
+    pointer-events: none;
+}
+
+.vmouse-coords {
+    font-size: 12px;
+    color: var(--text-2);
+    font-family: 'JetBrains Mono', monospace;
+    background: var(--surface-3);
+    padding: 6px 12px;
+    border-radius: var(--r-sm);
+    border: 1px solid var(--border);
+}
+
+.vmouse-controls-side {
+    width: 260px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.vmouse-mode-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text-2);
+}
+
+.btn-subtab {
+    padding: 5px 10px;
+    background: var(--surface-3);
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    color: var(--text-2);
+    font-size: 11px;
+    cursor: pointer;
+}
+.btn-subtab.active {
+    background: var(--accent);
+    color: #000;
+    border-color: var(--accent);
+    font-weight: 700;
+}
+
+/* D-Pad Joystick */
+.dpad-container {
+    display: grid;
+    grid-template-columns: repeat(3, 50px);
+    grid-template-rows: repeat(3, 50px);
+    gap: 6px;
+    justify-content: center;
+    margin: 0 auto;
+}
+
+.dpad-btn {
+    background: var(--surface-3);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    color: var(--text-1);
+    font-size: 12px;
+    font-weight: bold;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s ease;
+}
+
+.dpad-btn:hover {
+    background: var(--surface-4);
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.dpad-btn:active {
+    transform: scale(0.92);
+    background: var(--accent);
+    color: #000;
+}
+
+.dpad-up { grid-column: 2; grid-row: 1; }
+.dpad-left { grid-column: 1; grid-row: 2; }
+.dpad-center { grid-column: 2; grid-row: 2; background: rgba(255, 90, 0, 0.15); border-color: var(--accent); color: var(--accent); font-size: 10px; }
+.dpad-right { grid-column: 3; grid-row: 2; }
+.dpad-down { grid-column: 2; grid-row: 3; }
+
+.vmouse-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+}
+
+/* IoT Grid */
+.iot-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 14px;
+}
+
+.iot-card {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    transition: all 0.2s ease;
+}
+
+.iot-card:hover {
+    border-color: rgba(255, 106, 0, 0.4);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+}
+
+.iot-card__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.iot-card__title {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text-1);
+}
+
+.iot-card__location {
+    font-size: 11px;
+    color: var(--text-3);
+}
+
+.iot-card__controls {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 4px;
+}
+
+.iot-card__slider {
+    width: 100%;
+    margin-top: 6px;
+    accent-color: var(--accent);
+}
+
+/* Floorplan Canvas */
+.floorplan-wrap {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    background: #0b0c10;
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    padding: 10px;
+}
+
+#iotFloorplanCanvas {
+    background: #11131a;
+    border-radius: var(--r-sm);
+    cursor: pointer;
+    box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.8);
+}
+
+.floorplan-overlay-info {
+    font-size: 11px;
+    color: var(--text-3);
+    margin-top: 8px;
+}
+/* ═══════════════════════════════════════════════
+   AGENT PROGRESS  —  live view of a multi-step task
+   ═══════════════════════════════════════════════ */
+
+.agent-progress .message-content {
+    background: var(--surface-card);
+    border: 1px solid var(--border-accent);
+}
+
+.agent-progress__title {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: var(--sp-2);
+}
+
+.agent-progress--done .agent-progress__title {
+    color: var(--green);
+}
+
+.agent-progress__steps {
+    margin: 0;
+    padding-left: 1.15rem;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.agent-progress__steps li {
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--text-2);
+}
+
+.agent-progress__tool {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--accent);
+    background: var(--accent-muted);
+    border: 1px solid var(--accent-border);
+    border-radius: var(--r-xs);
+    padding: 1px 6px;
+    margin-right: 6px;
+}
+
+/* ═══════════════════════════════════════════════
+   CONFIRMATION  —  a sensitive action awaiting approval
+   ═══════════════════════════════════════════════ */
+
+.confirm-request .message-content {
+    background: var(--surface-card);
+    border: 1px solid rgba(248, 113, 113, .35);
+}
+
+.confirm-request__title {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--red);
+    margin-bottom: var(--sp-2);
+}
+
+.confirm-request__detail {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    line-height: 1.55;
+    color: var(--text-2);
+    background: rgba(0, 0, 0, .35);
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    padding: var(--sp-2) var(--sp-3);
+    margin: 0 0 var(--sp-3);
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-x: auto;
+}
+
+.confirm-request__actions {
+    display: flex;
+    gap: var(--sp-2);
+}
+
+.confirm-btn {
+    font-family: var(--font-body);
+    font-size: 12.5px;
+    font-weight: 500;
+    padding: 6px 16px;
+    border-radius: var(--r-sm);
+    cursor: pointer;
+    transition: background .15s ease, border-color .15s ease;
+}
+
+.confirm-btn:disabled {
+    opacity: .45;
+    cursor: default;
+}
+
+.confirm-btn--yes {
+    background: var(--accent-muted);
+    border: 1px solid var(--accent-border);
+    color: var(--accent);
+}
+
+.confirm-btn--yes:hover:not(:disabled) {
+    background: rgba(255, 90, 0, .18);
+    border-color: var(--accent);
+}
+
+.confirm-btn--no {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-2);
+}
+
+.confirm-btn--no:hover:not(:disabled) {
+    border-color: var(--red);
+    color: var(--red);
+}

@@ -1,12 +1,14 @@
 """
-MARK — Main Application Server (FastAPI + Async SocketIO)
-Fully asynchronous server powering the MARK AI System Controller.
-Uses uvicorn + python-socketio for zero-blocking concurrency.
+MARK — Main Application Server (FastAPI + async Socket.IO)
+
+Fully asynchronous. Model inference and other blocking work runs in a thread
+pool so the event loop stays responsive while Gemma is decoding.
 """
 
 import os
 import time
 import asyncio
+import contextlib
 import socketio
 import uvicorn
 from fastapi import FastAPI, UploadFile, File, Request
@@ -14,25 +16,167 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from dotenv import load_dotenv
 
-from core.ai_engine import get_ai_response, get_ai_response_streaming, reset_conversation, get_system_prompt, set_system_prompt, get_llm_backend, set_llm_backend
-from core.tts_engine import text_to_speech_base64, get_available_voices, set_voice, get_current_voice, get_current_lang
+from core.ai_engine import (
+    get_ai_response, get_ai_response_streaming, reset_conversation,
+    get_system_prompt, set_system_prompt, get_llm_backend, set_llm_backend,
+)
 from core.fast_router import try_fast_route
+from core.tts_engine import (
+    text_to_speech_base64, get_available_voices, set_voice,
+    get_current_voice, get_current_lang,
+)
 from core.system_controller import set_brightness, TOOL_MAP
-from core.agentic import run_agentic_task, get_agentic_plan
+from core.agentic import run_agentic_task, get_agentic_plan, should_use_agent
+from core import permissions
+from core.tool_executor import get_pending
 from tools.reminder_manager import start_scheduler as start_reminder_scheduler
 from tools.clipboard_manager import start_clipboard_monitor
 from services.gesture_controller import execute_gesture
 from services.proactive_monitor import start_proactive_monitor
 from services.focus_bubble import set_socketio as focus_set_socketio
+from tools.iot_controller import get_iot_state_dict, control_iot_device, list_iot_devices
+from tools.virtual_mouse import (
+    move_virtual_mouse, virtual_mouse_click, virtual_mouse_dpad,
+    virtual_mouse_scroll, get_virtual_mouse_state,
+)
 
 load_dotenv()
 
+PORT = int(os.getenv("PORT", "3000"))
+
+sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
+
+
 # ─────────────────────────────────────────────
-# FASTAPI + ASYNC SOCKETIO SETUP
+# LIFESPAN
 # ─────────────────────────────────────────────
 
-app = FastAPI(title="MARK AI System Controller")
-sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
+class SioBridge:
+    """Lets synchronous background services emit on the async Socket.IO server."""
+
+    def __init__(self, server, loop):
+        self._sio = server
+        self._loop = loop
+
+    def emit(self, event, data=None):
+        try:
+            asyncio.run_coroutine_threadsafe(self._sio.emit(event, data), self._loop)
+        except Exception as e:
+            print(f"  ⚠️  Emit failed for {event}: {e}")
+
+
+def _start_service(name, fn, *args):
+    """Run a startup hook, reporting failure without taking the server down."""
+    try:
+        fn(*args)
+        return True
+    except Exception as e:
+        print(f"  ⚠️  {name}: {e}")
+        return False
+
+
+@contextlib.asynccontextmanager
+async def lifespan(app):
+    print(f"""
+    ╔════════════════════════════════════════════╗
+    ║              M.A.R.K.  v3.0                ║
+    ║        AI System Controller                ║
+    ║        http://localhost:{PORT}               ║
+    ║        Local Gemma 3 4B — Metal GPU        ║
+    ╚════════════════════════════════════════════╝
+    """)
+
+    loop = asyncio.get_running_loop()
+    bridge = SioBridge(sio, loop)
+
+    # HUD card needs the socket server, so it is bound here rather than at import.
+    def show_hud_card(title="MARK HUD", content="", icon="🔮", duration=8):
+        try:
+            duration = int(duration)
+        except (ValueError, TypeError):
+            duration = 8
+        bridge.emit("hud_card", {"title": title, "content": content,
+                                 "icon": icon, "duration": duration})
+        return f"HUD card displayed: {title}"
+
+    TOOL_MAP["show_hud_card"] = show_hud_card
+
+    await asyncio.to_thread(_start_service, "Reminder scheduler", start_reminder_scheduler, bridge)
+    await asyncio.to_thread(_start_service, "Clipboard monitor", start_clipboard_monitor)
+    await asyncio.to_thread(_start_service, "Proactive monitor", start_proactive_monitor, bridge)
+    _start_service("Focus bubble", focus_set_socketio, bridge)
+
+    # Ambient triggers — calendar-free, purely local signals.
+    try:
+        from services.proactive_triggers import start_triggers
+        await asyncio.to_thread(start_triggers, bridge)
+    except Exception as e:
+        print(f"  ⚠️  Proactive triggers: {e}")
+
+    # Dictation hotkey.
+    try:
+        from services.dictation import start_dictation
+        await asyncio.to_thread(start_dictation, bridge)
+    except Exception as e:
+        print(f"  ⚠️  Dictation: {e}")
+
+    # MCP servers.
+    try:
+        from core.mcp_client import (
+            mcp_connect_all_sync, list_server_configs, enabled_server_configs,
+        )
+        all_servers = list_server_configs()
+        enabled = enabled_server_configs()
+        if enabled:
+            result = await asyncio.to_thread(mcp_connect_all_sync)
+            if result.get("connected"):
+                print(f"  🔌 MCP: connected — {', '.join(result['connected'])}")
+            if result.get("failed"):
+                print(f"  🔌 MCP: could not reach {', '.join(result['failed'])} "
+                      f"(they stay off; nothing else is affected)")
+        elif all_servers:
+            print(f"  🔌 MCP: {len(all_servers)} servers available, all off. "
+                  f"Say \"enable the filesystem MCP server\" to switch one on.")
+        else:
+            print("  🔌 MCP: no servers configured")
+    except Exception as e:
+        print(f"  ⚠️  MCP: {e}")
+
+    # Menu-bar command palette. rumps needs the main thread, which uvicorn owns,
+    # so it runs as its own process and talks to us over the REST API.
+    try:
+        from services.command_palette import launch_detached
+        launch_detached(PORT)
+    except Exception as e:
+        print(f"  ⚠️  Command palette: {e}")
+
+    # Warm the model last, in the background, so the first request does not pay
+    # for loading it. It runs after the other services have finished printing:
+    # silencing ggml's startup chatter means redirecting file descriptor 2,
+    # which is process-wide, so overlapping it with other output loses lines.
+    import threading
+    from core.local_llm import load_model
+    threading.Thread(target=load_model, daemon=True, name="model-warmup").start()
+
+    print(f"\n  ✅ MARK is live at http://localhost:{PORT}\n")
+
+    yield
+
+    # ── Shutdown ──
+    try:
+        from services.command_palette import stop_detached
+        stop_detached()
+    except Exception:
+        pass
+    try:
+        from core.mcp_client import mcp_disconnect_all_sync
+        await asyncio.to_thread(mcp_disconnect_all_sync)
+    except Exception:
+        pass
+    print("  👋 MARK stopped.")
+
+
+app = FastAPI(title="MARK AI System Controller", lifespan=lifespan)
 socket_app = socketio.ASGIApp(sio, app)
 
 
@@ -45,12 +189,24 @@ async def index():
     return FileResponse("static/index.html")
 
 
+@app.get("/api/health")
+async def api_health():
+    """Readiness probe — used by the command palette and by tests."""
+    from core.local_llm import get_model_status
+    return {
+        "ok": True,
+        "model": get_model_status(),
+        "backend": get_llm_backend(),
+        "pending_confirmation": get_pending(),
+    }
+
+
 @app.post("/upload_3d")
 async def upload_3d(file: UploadFile = File(...)):
     if not file.filename:
         return JSONResponse({"error": "No file selected"}, status_code=400)
     os.makedirs("static/uploads", exist_ok=True)
-    safe = file.filename.replace("/", "_").replace("\\", "_")
+    safe = os.path.basename(file.filename).replace("/", "_").replace("\\", "_")
     path = os.path.join("static/uploads", safe)
     content = await file.read()
     with open(path, "wb") as f:
@@ -60,121 +216,159 @@ async def upload_3d(file: UploadFile = File(...)):
 
 @app.post("/api/command")
 async def api_command(request: Request):
-    """REST endpoint for the Floating Command Palette and external integrations."""
+    """Single-shot command endpoint used by the palette and external callers."""
     data = await request.json()
-    command = data.get("command", "").strip()
+    command = (data.get("command") or "").strip()
     if not command:
         return JSONResponse({"error": "No command"}, status_code=400)
 
-    # Fast path first
-    fast = try_fast_route(command)
+    fast = await asyncio.to_thread(try_fast_route, command)
     if fast:
-        return {"response": fast["text"], "fast": True}
+        return {"response": fast["text"], "tool_calls": fast["tool_calls"], "fast": True}
 
-    # Slow path: AI
     result = await asyncio.to_thread(get_ai_response, command)
     return {"response": result["text"], "tool_calls": result.get("tool_calls"), "fast": False}
 
 
 @app.get("/api/voices")
 async def api_voices():
-    """Return the curated list of available TTS voices."""
-    voices = get_available_voices()
-    current = get_current_voice()
-    return {"voices": voices, "current": current}
+    return {"voices": get_available_voices(), "current": get_current_voice()}
 
 
 @app.post("/api/set_voice")
 async def api_set_voice(request: Request):
-    """Change the active TTS voice at runtime."""
     data = await request.json()
-    voice_id = data.get("voice_id", "").strip()
+    voice_id = (data.get("voice_id") or "").strip()
     if not voice_id:
         return JSONResponse({"error": "voice_id required"}, status_code=400)
-    ok = set_voice(voice_id)
-    if ok:
-        lang = get_current_lang()
-        return {"success": True, "voice_id": voice_id, "lang": lang}
+    if set_voice(voice_id):
+        return {"success": True, "voice_id": voice_id, "lang": get_current_lang()}
     return JSONResponse({"error": f"Unknown voice: {voice_id}"}, status_code=400)
 
 
 @app.get("/api/llm_status")
 async def api_llm_status():
-    """Return current LLM backend and model status."""
-    from core.local_llm import get_model_status
+    from core.local_llm import get_model_status, has_vision_projector, vision_model_enabled
     return {
         "backend": get_llm_backend(),
         "local_model": get_model_status(),
+        "vision_projector_present": has_vision_projector(),
+        "vision_model_enabled": vision_model_enabled(),
     }
+
+
+@app.post("/api/set_llm_backend")
+async def api_set_llm_backend(request: Request):
+    data = await request.json()
+    backend = (data.get("backend") or "").strip()
+    if backend == "local":
+        import threading
+        from core.local_llm import load_model
+        threading.Thread(target=load_model, daemon=True).start()
+    if set_llm_backend(backend):
+        return {"success": True, "backend": backend}
+    return JSONResponse(
+        {"error": f"Invalid backend: {backend}. Use 'local' or 'ollama'."},
+        status_code=400,
+    )
 
 
 @app.post("/api/agentic")
 async def api_agentic(request: Request):
-    """Execute a complex multi-step task using the agentic loop."""
     data = await request.json()
-    task = data.get("task", "").strip()
-    max_steps = data.get("max_steps", 15)
+    task = (data.get("task") or "").strip()
     if not task:
         return JSONResponse({"error": "No task provided"}, status_code=400)
-
-    result = await asyncio.to_thread(run_agentic_task, task, max_steps)
-    return result
+    max_steps = int(data.get("max_steps", 10))
+    return await asyncio.to_thread(run_agentic_task, task, max_steps)
 
 
 @app.post("/api/agentic_plan")
 async def api_agentic_plan(request: Request):
-    """Get a plan for a task without executing it."""
     data = await request.json()
-    task = data.get("task", "").strip()
+    task = (data.get("task") or "").strip()
     if not task:
         return JSONResponse({"error": "No task provided"}, status_code=400)
+    return {"plan": await asyncio.to_thread(get_agentic_plan, task)}
 
-    plan = await asyncio.to_thread(get_agentic_plan, task)
-    return {"plan": plan}
 
+# ── Safety layer ──
+
+@app.get("/api/permissions")
+async def api_permissions():
+    return {
+        "pending": get_pending(),
+        "auto_approve": permissions.is_auto_approve(),
+        "undoable": permissions.list_undo(5),
+    }
+
+
+@app.post("/api/permissions/resolve")
+async def api_resolve_permission(request: Request):
+    from core.tool_executor import resolve_pending
+    data = await request.json()
+    decision = "yes" if data.get("approve") else "no"
+    text, calls = await asyncio.to_thread(resolve_pending, decision)
+    return {"response": text, "tool_calls": calls}
+
+
+@app.post("/api/undo")
+async def api_undo():
+    return {"response": await asyncio.to_thread(permissions.undo_last)}
+
+
+@app.get("/api/audit")
+async def api_audit(count: int = 25):
+    return {"log": permissions.recent_audit(count)}
+
+
+# ── MCP ──
 
 @app.get("/api/mcp_status")
 async def api_mcp_status():
-    """Get MCP server connection status."""
     from core.mcp_client import mcp_get_status_sync
     return {"servers": mcp_get_status_sync()}
 
 
 @app.post("/api/mcp_connect")
 async def api_mcp_connect(request: Request):
-    """Connect to MCP servers."""
     data = await request.json()
-    server_name = data.get("server_name", "all")
     from core.mcp_client import mcp_connect
-    result = await asyncio.to_thread(mcp_connect, server_name)
-    return {"result": result}
+    return {"result": await asyncio.to_thread(mcp_connect, data.get("server_name", "all"))}
 
 
-@app.post("/api/set_llm_backend")
-async def api_set_llm_backend(request: Request):
-    """Switch LLM backend (currently only 'local' supported)."""
+# ── IoT & virtual mouse ──
+
+@app.get("/api/iot/devices")
+async def api_get_iot_devices():
+    return get_iot_state_dict()
+
+
+@app.post("/api/iot/control")
+async def api_control_iot_device(request: Request):
     data = await request.json()
-    backend = data.get("backend", "").strip()
-    if backend == "local":
-        # Pre-load model in background thread
-        import threading
-        from core.local_llm import load_model
-        threading.Thread(target=load_model, daemon=True).start()
-    ok = set_llm_backend(backend)
-    if ok:
-        return {"success": True, "backend": backend}
-    return JSONResponse({"error": f"Invalid backend: {backend}. Use: local"}, status_code=400)
+    msg = control_iot_device(data.get("device", ""), data.get("action", ""), data.get("value"))
+    return {"message": msg, "devices": get_iot_state_dict()}
 
+
+@app.get("/api/virtual_mouse/state")
+async def api_virtual_mouse_state():
+    return get_virtual_mouse_state()
 
 
 # ─────────────────────────────────────────────
-# SOCKETIO EVENTS
+# SOCKET.IO
 # ─────────────────────────────────────────────
 
 @sio.on("connect")
 async def handle_connect(sid, environ):
     print("🔌 Client connected")
     await sio.emit("status", {"message": "Connected to MARK", "type": "success"}, to=sid)
+    await sio.emit("iot_state_update", get_iot_state_dict(), to=sid)
+    await sio.emit("virtual_mouse_update", get_virtual_mouse_state(), to=sid)
+    pending = get_pending()
+    if pending:
+        await sio.emit("confirmation_required", pending, to=sid)
 
 
 @sio.on("disconnect")
@@ -182,240 +376,246 @@ async def handle_disconnect(sid):
     print("🔌 Client disconnected")
 
 
+@sio.on("iot_control")
+async def handle_iot_control(sid, data):
+    msg = control_iot_device(data.get("device_id"), data.get("action", "toggle"), data.get("value"))
+    await sio.emit("iot_state_update", get_iot_state_dict())
+    await sio.emit("status", {"message": msg, "type": "info"}, to=sid)
+
+
+@sio.on("virtual_mouse_move")
+async def handle_vmouse_move(sid, data):
+    move_virtual_mouse(data.get("x", 0), data.get("y", 0),
+                       relative=data.get("relative", False), mode=data.get("mode"))
+    await sio.emit("virtual_mouse_update", get_virtual_mouse_state())
+
+
+@sio.on("virtual_mouse_click")
+async def handle_vmouse_click(sid, data):
+    msg = virtual_mouse_click(button=data.get("button", "left"))
+    await sio.emit("virtual_mouse_update", get_virtual_mouse_state())
+    await sio.emit("iot_state_update", get_iot_state_dict())
+    await sio.emit("status", {"message": msg, "type": "info"}, to=sid)
+
+
+@sio.on("virtual_mouse_dpad")
+async def handle_vmouse_dpad(sid, data):
+    virtual_mouse_dpad(data.get("direction", "right"), data.get("step", 50))
+    await sio.emit("virtual_mouse_update", get_virtual_mouse_state())
+
+
+@sio.on("virtual_mouse_scroll")
+async def handle_vmouse_scroll(sid, data):
+    virtual_mouse_scroll(data.get("direction", "down"), data.get("amount", 3))
+    await sio.emit("virtual_mouse_update", get_virtual_mouse_state())
+
+
+# ─────────────────────────────────────────────
+# CONVERSATION
+# ─────────────────────────────────────────────
+
 @sio.on("user_message")
 async def handle_message(sid, data):
-    """Handle user text/voice message — fully async."""
-    user_text = data.get("message", "").strip()
+    """
+    Handle one turn.
+
+    Three paths:
+      fast    — deterministic shortcut, no model involved
+      agent   — genuine multi-step task, streamed step by step
+      chat    — model turn, streamed sentence by sentence into TTS
+    """
+    user_text = (data.get("message") or "").strip()
     if not user_text:
         return
 
-    print(f"👤 User: {user_text}")
+    print(f"\n👤 {user_text}")
     await sio.emit("thinking", {"status": True}, to=sid)
+    start = time.time()
 
     try:
-        start = time.time()
-
-        # ⚡ FAST PATH: instant local regex match (no AI, no network)
-        fast_result = try_fast_route(user_text)
-        if fast_result:
-            elapsed = round(time.time() - start, 4)
-            ai_text = fast_result["text"]
-            tool_calls = fast_result.get("tool_calls")
-            print(f"⚡ FAST: {ai_text[:80]} ({elapsed}s)")
-
+        # ── Fast path ──
+        fast = await asyncio.to_thread(try_fast_route, user_text)
+        if fast:
+            elapsed = round(time.time() - start, 2)
+            print(f"⚡ FAST: {fast['tool_calls'][0]['name']} ({elapsed}s)")
             await sio.emit("ai_response", {
-                "text": ai_text,
-                "tool_calls": tool_calls,
-                "response_time": elapsed,
+                "text": fast["text"], "tool_calls": fast["tool_calls"],
+                "response_time": elapsed, "fast": True,
             }, to=sid)
-
-            # TTS in background — starts playing immediately (non-blocking)
-            asyncio.create_task(_send_tts(ai_text, sid))
-            await sio.emit("thinking", {"status": False}, to=sid)
+            await _speak(fast["text"], sid)
             return
 
-        # Check if this is a complex multi-step task that needs agentic mode
-        agentic_triggers = [
-            "and then", "step by step", "after that", "first ", "next ",
-            "create a project", "set up", "build me", "install and configure",
-            "find and replace", "search and", "download and",
-            "write a script that", "make a program that",
-            "automate", "do all", "complete the following",
-        ]
-        user_lower = user_text.lower()
-        is_agentic = any(trigger in user_lower for trigger in agentic_triggers)
+        # ── Agent path ──
+        if should_use_agent(user_text):
+            print("🧠 AGENT MODE")
+            await _run_agent(user_text, sid, start)
+            return
 
-        if is_agentic:
-            # AGENTIC PATH: Multi-step autonomous execution
-            print(f"🧠 AGENTIC MODE: \"{user_text[:60]}...\"")
-
-            async def on_agentic_step(step_num, step_info):
-                tool_names = [tc["name"] for tc in step_info.get("tool_calls", [])]
-                msg = step_info.get("ai_text") or f"Step {step_num}: {', '.join(tool_names)}" if tool_names else f"Step {step_num}: thinking..."
-                await sio.emit("agentic_step", {
-                    "step": step_num,
-                    "message": msg[:200],
-                    "tools": tool_names,
-                }, to=sid)
-
-            # Run agentic loop (sync callback won't work directly, so we skip on_step for now)
-            result = await asyncio.to_thread(run_agentic_task, user_text, 15)
-            elapsed = round(time.time() - start, 2)
-
-            ai_text = result["text"]
-            tool_calls = result.get("tool_calls")
-            step_count = result.get("step_count", 0)
-            print(f"🧠 AGENTIC DONE: {step_count} steps, {elapsed}s")
-
-            await sio.emit("ai_response", {
-                "text": ai_text,
-                "tool_calls": tool_calls,
-                "response_time": elapsed,
-                "agentic": True,
-                "steps": step_count,
-            }, to=sid)
-        else:
-            # STREAMING PATH: LLM streams text → TTS starts on first sentence
-            from core.tts_engine import get_current_voice, _current_rate, _current_pitch
-
-            voice = get_current_voice()
-            rate = _current_rate
-            pitch = _current_pitch
-
-            sentences_yielded = 0
-            full_text = ""
-            tool_calls = None
-            tts_tasks = []
-            queue = asyncio.Queue()
-            loop = asyncio.get_event_loop()
-
-            def _run_streaming():
-                """Run sync generator in thread, push events to async queue."""
-                for event in get_ai_response_streaming(user_text):
-                    loop.call_soon_threadsafe(queue.put_nowait, event)
-                loop.call_soon_threadsafe(queue.put_nowait, None)  # sentinel
-
-            # Start LLM streaming in background thread
-            stream_task = asyncio.create_task(asyncio.to_thread(_run_streaming))
-
-            # Process events as they arrive
-            while True:
-                event = await queue.get()
-                if event is None:
-                    break
-
-                if event["type"] == "sentence":
-                    sentences_yielded += 1
-                    sentence_text = event["text"]
-                    # Fire off TTS generation for this sentence immediately
-                    tts_task = asyncio.create_task(
-                        _emit_tts_chunk(sentence_text, sentences_yielded - 1, voice, rate, pitch, sid)
-                    )
-                    tts_tasks.append(tts_task)
-
-                elif event["type"] == "done":
-                    full_text = event["text"]
-                    tool_calls = event.get("tool_calls")
-
-            await stream_task  # Ensure thread is done
-
-            elapsed = round(time.time() - start, 2)
-            ai_text = full_text
-            print(f"🤖 MARK: {ai_text[:80]} ({elapsed}s)")
-
-            await sio.emit("ai_response", {
-                "text": ai_text,
-                "tool_calls": tool_calls,
-                "response_time": elapsed,
-            }, to=sid)
-
-            # If we streamed sentences, wait for all TTS tasks and emit final marker
-            if tts_tasks:
-                await asyncio.gather(*tts_tasks, return_exceptions=True)
-                # Emit a final marker so client knows streaming is done
-                await sio.emit("tts_chunk", {
-                    "audio": "",
-                    "index": sentences_yielded,
-                    "total": sentences_yielded,
-                    "text": "",
-                    "final": True,
-                    "streaming": True,
-                }, to=sid)
-            elif tool_calls:
-                # Tool call path — TTS the result normally
-                asyncio.create_task(_send_tts(ai_text, sid))
-            else:
-                # No sentences were streamed (very short response) — TTS normally
-                asyncio.create_task(_send_tts(ai_text, sid))
+        # ── Chat path (streamed) ──
+        await _run_chat(user_text, sid, start)
 
     except Exception as e:
-        error_msg = f"Error processing request: {str(e)}"
-        print(f"❌ {error_msg}")
-        await sio.emit("ai_response", {"text": error_msg, "tool_calls": None}, to=sid)
+        import traceback
+        traceback.print_exc()
+        message = "Something went wrong on my end, sir. Try that again?"
+        await sio.emit("ai_response", {"text": message, "tool_calls": None}, to=sid)
+        await _speak(message, sid)
 
     finally:
         await sio.emit("thinking", {"status": False}, to=sid)
 
 
-async def _send_tts(text, sid=None):
-    """Generate TTS audio in streaming chunks and emit each sentence independently.
-    First sentence starts playing within ~300ms — near-zero perceived latency."""
+async def _run_chat(user_text, sid, start):
+    """Stream a model turn, synthesising each sentence as it lands."""
+    from core.tts_engine import get_current_voice, _current_rate, _current_pitch
+
+    voice, rate, pitch = get_current_voice(), _current_rate, _current_pitch
+
+    queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    def produce():
+        try:
+            for event in get_ai_response_streaming(user_text):
+                loop.call_soon_threadsafe(queue.put_nowait, event)
+        except Exception as e:
+            loop.call_soon_threadsafe(queue.put_nowait,
+                                      {"type": "done", "text": f"Error: {e}", "tool_calls": None})
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, None)
+
+    producer = asyncio.create_task(asyncio.to_thread(produce))
+
+    tts_tasks = []
+    index = 0
+    final_text = ""
+    tool_calls = None
+    first_audio_at = None
+
+    while True:
+        event = await queue.get()
+        if event is None:
+            break
+
+        kind = event.get("type")
+
+        if kind == "tool":
+            await sio.emit("tool_used", {"name": event["name"],
+                                         "result": str(event["result"])[:400]}, to=sid)
+            if "needs your go-ahead" in str(event.get("result", "")):
+                await sio.emit("confirmation_required", get_pending() or {}, to=sid)
+
+        elif kind == "sentence":
+            if first_audio_at is None:
+                first_audio_at = round(time.time() - start, 2)
+            tts_tasks.append(asyncio.create_task(
+                _emit_tts_chunk(event["text"], index, voice, rate, pitch, sid)
+            ))
+            index += 1
+
+        elif kind == "done":
+            final_text = event["text"]
+            tool_calls = event.get("tool_calls")
+
+    await producer
+
+    elapsed = round(time.time() - start, 2)
+    if first_audio_at:
+        print(f"  ⏱  first audio {first_audio_at}s · total {elapsed}s")
+
+    await sio.emit("ai_response", {
+        "text": final_text, "tool_calls": tool_calls, "response_time": elapsed,
+    }, to=sid)
+
+    if tts_tasks:
+        await asyncio.gather(*tts_tasks, return_exceptions=True)
+        await sio.emit("tts_chunk", {
+            "audio": "", "index": index, "total": index,
+            "text": "", "final": True, "streaming": True,
+        }, to=sid)
+    elif final_text:
+        await _speak(final_text, sid)
+
+
+async def _run_agent(user_text, sid, start):
+    """Run a multi-step task, reporting each step to the UI as it happens."""
+    loop = asyncio.get_running_loop()
+
+    def on_step(step_num, record):
+        tools = [c["name"] for c in record.get("tool_calls", [])]
+        asyncio.run_coroutine_threadsafe(sio.emit("agentic_step", {
+            "step": step_num,
+            "message": record.get("ai_text", "")[:200],
+            "tools": tools,
+        }, to=sid), loop)
+
+    result = await asyncio.to_thread(run_agentic_task, user_text, 10, on_step)
+    elapsed = round(time.time() - start, 2)
+    print(f"🧠 AGENT DONE: {result['step_count']} steps in {elapsed}s")
+
+    await sio.emit("ai_response", {
+        "text": result["text"],
+        "tool_calls": result.get("tool_calls"),
+        "response_time": elapsed,
+        "agentic": True,
+        "steps": result["step_count"],
+    }, to=sid)
+
+    if get_pending():
+        await sio.emit("confirmation_required", get_pending(), to=sid)
+
+    await _speak(result["text"], sid)
+
+
+# ─────────────────────────────────────────────
+# SPEECH
+# ─────────────────────────────────────────────
+
+async def _emit_tts_chunk(text, index, voice, rate, pitch, sid=None):
+    """Synthesise one sentence and push it to the client."""
+    from core.streaming_tts import generate_tts_chunk
+    try:
+        audio = await generate_tts_chunk(text, voice, rate, pitch)
+        if not audio:
+            return
+        payload = {"audio": audio, "index": index, "total": -1,
+                   "text": text, "final": False, "streaming": True}
+        await (sio.emit("tts_chunk", payload, to=sid) if sid else sio.emit("tts_chunk", payload))
+    except Exception as e:
+        print(f"  TTS chunk {index} failed: {e}")
+
+
+async def _speak(text, sid=None):
+    """Synthesise a complete utterance (used off the streaming path)."""
     from core.streaming_tts import stream_tts_chunks, split_into_chunks
     from core.tts_engine import get_current_voice, _current_rate, _current_pitch
 
+    if not text:
+        return
     try:
-        voice = get_current_voice()
-        rate = _current_rate
-        pitch = _current_pitch
-
         chunks = split_into_chunks(text)
         if not chunks:
             return
 
-        # If it's a short response (1-2 sentences), use the fast single-chunk path
         if len(chunks) <= 2:
-            audio_b64 = await asyncio.to_thread(text_to_speech_base64, text)
-            if audio_b64:
-                if sid:
-                    await sio.emit("tts_audio", {"audio": audio_b64}, to=sid)
-                else:
-                    await sio.emit("tts_audio", {"audio": audio_b64})
+            audio = await asyncio.to_thread(text_to_speech_base64, text)
+            if audio:
+                payload = {"audio": audio}
+                await (sio.emit("tts_audio", payload, to=sid) if sid else sio.emit("tts_audio", payload))
             return
 
-        # Streaming path: emit each sentence's audio as soon as it's ready
-        chunk_count = 0
-        async for chunk_data in stream_tts_chunks(text, voice, rate, pitch):
-            emit_data = {
-                "audio": chunk_data["audio"],
-                "index": chunk_data["index"],
-                "total": chunk_data["total"],
-                "text": chunk_data["text"],
-                "final": chunk_data["final"],
-                "streaming": True,
-            }
-            if sid:
-                await sio.emit("tts_chunk", emit_data, to=sid)
-            else:
-                await sio.emit("tts_chunk", emit_data)
-            chunk_count += 1
-
-        print(f"  🔊 Streamed {chunk_count} TTS chunks")
+        voice, rate, pitch = get_current_voice(), _current_rate, _current_pitch
+        async for chunk in stream_tts_chunks(text, voice, rate, pitch):
+            payload = {**chunk, "streaming": True}
+            await (sio.emit("tts_chunk", payload, to=sid) if sid else sio.emit("tts_chunk", payload))
 
     except Exception as e:
-        print(f"  TTS streaming error: {e}")
-        # Fallback to non-streaming
-        try:
-            audio_b64 = await asyncio.to_thread(text_to_speech_base64, text)
-            if audio_b64:
-                if sid:
-                    await sio.emit("tts_audio", {"audio": audio_b64}, to=sid)
-                else:
-                    await sio.emit("tts_audio", {"audio": audio_b64})
-        except Exception:
-            pass
+        print(f"  TTS error: {e}")
 
 
-async def _emit_tts_chunk(text, index, voice, rate, pitch, sid=None):
-    """Generate TTS for a single sentence and emit it as a streaming chunk."""
-    from core.streaming_tts import generate_tts_chunk
-    try:
-        audio_b64 = await generate_tts_chunk(text, voice, rate, pitch)
-        if audio_b64:
-            emit_data = {
-                "audio": audio_b64,
-                "index": index,
-                "total": -1,  # Unknown total during streaming
-                "text": text,
-                "final": False,
-                "streaming": True,
-            }
-            if sid:
-                await sio.emit("tts_chunk", emit_data, to=sid)
-            else:
-                await sio.emit("tts_chunk", emit_data)
-    except Exception as e:
-        print(f"  TTS chunk error for sentence {index}: {e}")
-
+# ─────────────────────────────────────────────
+# MISC EVENTS
+# ─────────────────────────────────────────────
 
 @sio.on("reset_chat")
 async def handle_reset(sid):
@@ -425,8 +625,8 @@ async def handle_reset(sid):
 
 @sio.on("clap_activate")
 async def handle_clap_activate(sid):
-    print("👏👏 Clap activation triggered!")
-    asyncio.create_task(_send_tts("Activating all services. M.A.R.K. activated."))
+    print("👏 Clap detected")
+    await _speak("I'm here, sir.", sid)
 
 
 @sio.on("get_system_prompt")
@@ -436,10 +636,9 @@ async def handle_get_prompt(sid):
 
 @sio.on("set_system_prompt")
 async def handle_set_prompt(sid, data):
-    new_prompt = data.get("prompt", "").strip()
-    if new_prompt:
-        set_system_prompt(new_prompt)
-        print("✏️  System prompt updated")
+    prompt = (data.get("prompt") or "").strip()
+    if prompt:
+        set_system_prompt(prompt)
         await sio.emit("status", {"message": "System prompt saved", "type": "success"}, to=sid)
     else:
         await sio.emit("status", {"message": "Prompt cannot be empty", "type": "error"}, to=sid)
@@ -447,135 +646,31 @@ async def handle_set_prompt(sid, data):
 
 @sio.on("gesture")
 async def handle_gesture(sid, data):
-    gesture_type = data.get("type", "")
-    if gesture_type:
-        result = await asyncio.to_thread(execute_gesture, gesture_type)
-        print(f"🖐️ Gesture: {gesture_type} → {result}")
+    gesture = data.get("type", "")
+    if gesture:
+        result = await asyncio.to_thread(execute_gesture, gesture)
+        print(f"🖐️  Gesture: {gesture} → {result}")
 
 
 @sio.on("presence")
 async def handle_presence(sid, data):
-    present = data.get("present", True)
-    if not present:
-        print("👤 Presence: user away — dimming screen")
-        try:
+    if not data.get("present", True):
+        print("👤 User away — dimming")
+        with contextlib.suppress(Exception):
             await asyncio.to_thread(set_brightness, "20")
-        except Exception:
-            pass
         await sio.emit("proactive_alert", {
             "message": "Screen dimmed — welcome back when you return, sir.",
             "severity": "info",
         }, to=sid)
     else:
-        print("👤 Presence: user returned — restoring screen")
-        try:
+        print("👤 User back — restoring")
+        with contextlib.suppress(Exception):
             await asyncio.to_thread(set_brightness, "80")
-        except Exception:
-            pass
-        asyncio.create_task(_send_tts("Welcome back, sir."))
+        await _speak("Welcome back, sir.", sid)
 
 
-# ─────────────────────────────────────────────
-# STARTUP
-# ─────────────────────────────────────────────
-
-@app.on_event("startup")
-async def startup():
-    print("""
-    ╔══════════════════════════════════════╗
-    ║         M.A.R.K. SYSTEM              ║
-    ║    AI System Controller v2.0         ║
-    ║     http://localhost:5001            ║
-    ║     ⚡ Local Gemma 2 2B (GPU)        ║
-    ╚══════════════════════════════════════╝
-    """)
-
-    # Pre-load the local model in background
-    import threading
-    from core.local_llm import load_model
-    threading.Thread(target=load_model, daemon=True).start()
-
-    # Start background services in thread pool (each guarded against crash)
-    loop = asyncio.get_event_loop()
-
-    # Reminder scheduler needs the sio instance wrapped for compatibility
-    class SioCompat:
-        """Thin wrapper so legacy services can call .emit() synchronously."""
-        def emit(self, event, data=None):
-            asyncio.run_coroutine_threadsafe(sio.emit(event, data), loop)
-
-    sio_compat = SioCompat()
-
-    try:
-        await asyncio.to_thread(start_reminder_scheduler, sio_compat)
-    except Exception as e:
-        print(f"⚠️  Reminder scheduler error: {e}")
-
-    try:
-        await asyncio.to_thread(start_clipboard_monitor)
-    except Exception as e:
-        print(f"⚠️  Clipboard monitor error: {e}")
-
-    try:
-        await asyncio.to_thread(start_proactive_monitor, sio_compat)
-    except Exception as e:
-        print(f"⚠️  Proactive monitor error: {e}")
-
-    try:
-        focus_set_socketio(sio_compat)
-    except Exception as e:
-        print(f"⚠️  Focus bubble error: {e}")
-
-    # Register HUD card tool (needs sio instance)
-    def show_hud_card(title="MARK HUD", content="", icon="🔮", duration=8):
-        try:
-            duration = int(duration)
-        except (ValueError, TypeError):
-            duration = 8
-        asyncio.run_coroutine_threadsafe(
-            sio.emit("hud_card", {"title": title, "content": content, "icon": icon, "duration": duration}),
-            loop,
-        )
-        return f"HUD card displayed: {title}"
-
-    TOOL_MAP["show_hud_card"] = show_hud_card
-
-    # Auto-connect MCP servers (if configured)
-    try:
-        from core.mcp_client import mcp_connect_all_sync, list_server_configs
-        config = list_server_configs()
-        if config:
-            print(f"🔌 MCP: Connecting to {len(config)} configured server(s)...")
-            result = await asyncio.to_thread(mcp_connect_all_sync)
-            connected = result.get("connected", [])
-            failed = result.get("failed", [])
-            if connected:
-                print(f"  ✓ MCP connected: {', '.join(connected)}")
-            if failed:
-                print(f"  ✗ MCP failed: {', '.join(failed)}")
-        else:
-            print("🔌 MCP: No servers configured (add to mcp_servers.json)")
-    except Exception as e:
-        print(f"⚠️  MCP startup error: {e}")
-
-    # Start dictation service (if available)
-    try:
-        from services.dictation import start_dictation
-        await asyncio.to_thread(start_dictation, sio_compat)
-        print("🎙️  Dictation service started (Ctrl+Shift+Space)")
-    except ImportError:
-        print("⚠️  Dictation service not available (install openai-whisper)")
-    except Exception as e:
-        print(f"⚠️  Dictation service error: {e}")
-
-    # Command palette (rumps) requires macOS main thread — cannot run under uvicorn.
-    # Skipping to prevent SIGABRT. Use standalone launcher for menubar integration.
-    print("⚠️  Command Palette skipped (rumps needs main thread)")
-
-
-# Mount static files AFTER routes so / route takes priority
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 if __name__ == "__main__":
-    uvicorn.run(socket_app, host="0.0.0.0", port=5001, log_level="info")
+    uvicorn.run(socket_app, host="0.0.0.0", port=PORT, log_level="warning")

@@ -46,6 +46,14 @@
                     <span class="status-dot" id="statusDot"></span>
                     <span class="status-label" id="statusText">Connecting</span>
                 </div>
+                <button class="topbar-btn topbar-btn--iot" id="btnOpenIotHud" title="IoT Smart Home & Virtual Mouse HUD">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
+                        <line x1="8" y1="21" x2="16" y2="21"/>
+                        <line x1="12" y1="17" x2="12" y2="21"/>
+                    </svg>
+                    IoT & Mouse
+                </button>
                 <button class="topbar-btn" id="btnReset" title="Reset conversation">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                         stroke-linecap="round" stroke-linejoin="round">
@@ -239,20 +247,20 @@
                 <!-- AI Backend -->
                 <div class="modal__section" id="backendSection">
                     <h3 class="modal__section-label">🧠 AI Backend</h3>
-                    <p class="modal__section-desc">Switch between local Llama 3.1 8B (private, on-device) and Groq cloud
-                        (faster, tool calling).</p>
+                    <p class="modal__section-desc">Gemma 3 4B runs on-device for routing and tool calls. Point replies at
+                        Ollama if you want a larger model for reasoning.</p>
 
                     <div class="backend-toggle-wrap">
-                        <button class="backend-btn active" id="btnBackendGroq" data-backend="groq">
-                            ☁️ Cloud (Groq)
+                        <button class="backend-btn active" id="btnBackendLocal" data-backend="local">
+                            💻 Local (Gemma 3 4B)
                         </button>
-                        <button class="backend-btn" id="btnBackendLocal" data-backend="local">
-                            💻 Local (Llama 3.1 8B)
+                        <button class="backend-btn" id="btnBackendOllama" data-backend="ollama">
+                            🦙 Ollama (bigger model)
                         </button>
                     </div>
                     <div class="backend-status" id="backendStatus">
                         <span class="backend-status__dot"></span>
-                        <span class="backend-status__text">Using Groq cloud</span>
+                        <span class="backend-status__text">Loading model…</span>
                     </div>
                 </div>
 
@@ -288,6 +296,82 @@
                     <textarea id="systemPromptEditor" class="prompt-editor" rows="10"
                         placeholder="Loading system prompt…"></textarea>
                     <button class="btn-primary" id="btnSavePrompt">Save Prompt</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── IoT & Virtual Mouse HUD Overlay Modal ── -->
+    <div class="modal-overlay" id="iotHudOverlay">
+        <div class="modal modal--wide" id="iotHudPanel">
+            <div class="modal__header">
+                <h2 class="modal__title">⚡ IoT Devices &amp; Virtual Mouse Controller</h2>
+                <button class="modal__close" id="btnCloseIotHud">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="18" y1="6" x2="6" y2="18" />
+                        <line x1="6" y1="6" x2="18" y2="18" />
+                    </svg>
+                </button>
+            </div>
+            <div class="modal__body">
+                <!-- Sub Tab Navigation -->
+                <div class="hud-tabs">
+                    <button class="hud-tab active" data-tab="mouse">🖱️ Virtual Mouse</button>
+                    <button class="hud-tab" data-tab="iot">💡 Smart Devices</button>
+                    <button class="hud-tab" data-tab="floorplan">🗺️ Floorplan Grid</button>
+                </div>
+
+                <!-- Tab 1: Virtual Mouse & Trackpad -->
+                <div class="hud-tab-content active" id="tabContentMouse">
+                    <div class="vmouse-layout">
+                        <div class="vmouse-touchpad-box">
+                            <div class="vmouse-touchpad" id="vmouseTrackpad">
+                                <div class="vmouse-cursor-dot" id="vmouseCursorDot"></div>
+                                <span class="vmouse-hint">Touch / Drag to move Virtual Cursor</span>
+                            </div>
+                            <div class="vmouse-coords" id="vmouseCoordsLabel">Position: (500, 300) · Mode: Desktop</div>
+                        </div>
+
+                        <div class="vmouse-controls-side">
+                            <div class="vmouse-mode-toggle">
+                                <label>Target Mode:</label>
+                                <button class="btn-subtab active" id="btnModeDesktop">💻 Desktop OS</button>
+                                <button class="btn-subtab" id="btnModeIot">💡 IoT Canvas</button>
+                            </div>
+
+                            <div class="dpad-container">
+                                <button class="dpad-btn dpad-up" id="dpadUp">▲</button>
+                                <button class="dpad-btn dpad-left" id="dpadLeft">◄</button>
+                                <button class="dpad-btn dpad-center" id="dpadClick">CLICK</button>
+                                <button class="dpad-btn dpad-right" id="dpadRight">►</button>
+                                <button class="dpad-btn dpad-down" id="dpadDown">▼</button>
+                            </div>
+
+                            <div class="vmouse-actions">
+                                <button class="btn-secondary" id="btnVmouseLeftClick">Left Click</button>
+                                <button class="btn-secondary" id="btnVmouseRightClick">Right Click</button>
+                                <button class="btn-secondary" id="btnVmouseScrollUp">Scroll Up</button>
+                                <button class="btn-secondary" id="btnVmouseScrollDown">Scroll Down</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tab 2: IoT Devices Grid -->
+                <div class="hud-tab-content" id="tabContentIot">
+                    <div class="iot-grid" id="iotDeviceGrid">
+                        <!-- Dynamically populated IoT Device Cards -->
+                    </div>
+                </div>
+
+                <!-- Tab 3: Floorplan Grid Canvas -->
+                <div class="hud-tab-content" id="tabContentFloorplan">
+                    <div class="floorplan-wrap">
+                        <canvas id="iotFloorplanCanvas" width="600" height="380"></canvas>
+                        <div class="floorplan-overlay-info">
+                            <span>Target devices by dragging the Virtual Cursor or clicking on nodes</span>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>

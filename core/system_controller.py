@@ -15,9 +15,8 @@ load_dotenv()
 SERPAPI_KEY = os.getenv("SERPAPI_KEY", "")
 
 # Import feature modules
-# Import feature modules
 from tools.memory_manager import save_memory, recall_memory, list_memories, delete_memory
-from tools.vision_engine import analyze_screen
+from tools.vision_engine import analyze_screen, read_screen_text
 from services.routines import run_routine, list_routines, create_routine
 from tools.reminder_manager import set_reminder, list_reminders, delete_reminder, clear_reminders
 from tools.phone_tracker import track_number
@@ -43,10 +42,15 @@ from tools.terminal import run_terminal, read_file, write_file, edit_file, list_
 from core.mcp_client import (
     mcp_status, mcp_connect, mcp_disconnect, mcp_list_tools,
     mcp_add_server, mcp_remove_server, mcp_call_tool_sync, mcp_is_tool,
+    mcp_enable_server, mcp_disable_server,
 )
 from tools.vision_click import vision_click, vision_find, vision_describe, vision_type, vision_interact
 from tools.rag_memory import rag_remember, rag_recall, rag_forget, rag_list, rag_stats
 from core.ollama_engine import check_ollama, list_ollama_models, pull_ollama_model, set_ollama_model
+from tools.iot_controller import list_iot_devices, control_iot_device, add_iot_device, get_iot_state_dict
+from tools.virtual_mouse import move_virtual_mouse, virtual_mouse_dpad, virtual_mouse_click, virtual_mouse_scroll, get_virtual_mouse_state
+from core.tool_executor import undo_last_action, list_recent_actions, list_undoable, always_allow
+
 
 
 def _run_applescript(script: str) -> str:
@@ -78,38 +82,197 @@ def _run_shell(cmd: str) -> str:
 
 
 # ─────────────────────────────────────────────
+# PATH RESOLUTION HELPERS
+# ─────────────────────────────────────────────
+
+def _resolve_folder_path(folder_path: str) -> str:
+    """Resolve a folder path, handling location phrases, case mismatch, and search."""
+    from core.paths import normalize, looks_foreign
+    if looks_foreign(folder_path):
+        # Model produced a Windows or placeholder path; rewrite it
+        # rather than creating a literal 'C:' directory.
+        return normalize(folder_path)
+
+    import re
+    clean = folder_path.strip()
+    clean = re.sub(r'^(?:the\s+)?folder\s+(?:named\s+|called\s+)?', '', clean, flags=re.I).strip()
+    clean = re.sub(r'^(?:named\s+|called\s+)', '', clean, flags=re.I).strip()
+
+    base_dir = None
+    loc_match = re.search(r'\s+(?:on|in)\s+(?:the\s+|my\s+)?(desktop|documents|downloads|home)$', clean, flags=re.I)
+    if loc_match:
+        loc = loc_match.group(1).lower()
+        clean = clean[:loc_match.start()].strip()
+        if loc == "desktop":
+            base_dir = os.path.expanduser("~/Desktop")
+        elif loc == "documents":
+            base_dir = os.path.expanduser("~/Documents")
+        elif loc == "downloads":
+            base_dir = os.path.expanduser("~/Downloads")
+        elif loc == "home":
+            base_dir = os.path.expanduser("~")
+
+    expanded = os.path.expanduser(clean)
+    if os.path.isdir(expanded):
+        return expanded
+
+    search_dirs = [base_dir] if base_dir else [
+        os.path.expanduser("~/Desktop"),
+        os.path.expanduser("~/Documents"),
+        os.path.expanduser("~/Downloads"),
+        os.path.expanduser("~"),
+        os.getcwd()
+    ]
+
+    for d in search_dirs:
+        if not d or not os.path.exists(d):
+            continue
+        candidate = os.path.join(d, clean)
+        if os.path.isdir(candidate):
+            return candidate
+        try:
+            for item in os.listdir(d):
+                if item.lower() == clean.lower():
+                    full_p = os.path.join(d, item)
+                    if os.path.isdir(full_p):
+                        return full_p
+        except Exception:
+            pass
+
+    try:
+        cmd = f'mdfind "kMDItemKind == \'Folder\' && kMDItemFSName == \'{clean}\'" | head -1'
+        res = _run_shell(cmd)
+        if res and os.path.isdir(res):
+            return res
+    except Exception:
+        pass
+
+    if base_dir:
+        return os.path.join(base_dir, clean)
+    return os.path.expanduser(f"~/Desktop/{clean}")
+
+
+def _resolve_file_path(file_path: str) -> str:
+    """Resolve a file path, handling location phrases, case mismatch, and search."""
+    from core.paths import normalize, looks_foreign
+    if looks_foreign(file_path):
+        # Model produced a Windows or placeholder path; rewrite it
+        # rather than creating a literal 'C:' directory.
+        return normalize(file_path)
+
+    import re
+    clean = file_path.strip()
+    clean = re.sub(r'^(?:the\s+)?file\s+(?:named\s+|called\s+)?', '', clean, flags=re.I).strip()
+    clean = re.sub(r'^(?:named\s+|called\s+)', '', clean, flags=re.I).strip()
+
+    base_dir = None
+    loc_match = re.search(r'\s+(?:on|in)\s+(?:the\s+|my\s+)?(desktop|documents|downloads|home)$', clean, flags=re.I)
+    if loc_match:
+        loc = loc_match.group(1).lower()
+        clean = clean[:loc_match.start()].strip()
+        if loc == "desktop":
+            base_dir = os.path.expanduser("~/Desktop")
+        elif loc == "documents":
+            base_dir = os.path.expanduser("~/Documents")
+        elif loc == "downloads":
+            base_dir = os.path.expanduser("~/Downloads")
+        elif loc == "home":
+            base_dir = os.path.expanduser("~")
+
+    expanded = os.path.expanduser(clean)
+    if os.path.isfile(expanded):
+        return expanded
+
+    search_dirs = [base_dir] if base_dir else [
+        os.path.expanduser("~/Desktop"),
+        os.path.expanduser("~/Documents"),
+        os.path.expanduser("~/Downloads"),
+        os.path.expanduser("~"),
+        os.getcwd()
+    ]
+
+    for d in search_dirs:
+        if not d or not os.path.exists(d):
+            continue
+        candidate = os.path.join(d, clean)
+        if os.path.isfile(candidate):
+            return candidate
+        try:
+            for item in os.listdir(d):
+                if item.lower() == clean.lower():
+                    full_p = os.path.join(d, item)
+                    if os.path.isfile(full_p):
+                        return full_p
+        except Exception:
+            pass
+
+    try:
+        cmd = f'mdfind "kMDItemFSName == \'{clean}\'" | head -1'
+        res = _run_shell(cmd)
+        if res and os.path.isfile(res):
+            return res
+    except Exception:
+        pass
+
+    if base_dir:
+        return os.path.join(base_dir, clean)
+    return os.path.expanduser(f"~/Desktop/{clean}")
+
+
+# ─────────────────────────────────────────────
 # APP LAUNCHING
 # ─────────────────────────────────────────────
 
 def open_app(app_name: str) -> str:
     """Open an application or alias efficiently."""
     import re
+    app_clean = app_name.strip()
+
+    # Delegate folder/file/url inputs
+    if re.match(r'^(?:the\s+)?folder\b', app_clean, re.I):
+        return open_folder(re.sub(r'^(?:the\s+)?folder\s+', '', app_clean, flags=re.I))
+    if re.match(r'^(?:the\s+)?file\b', app_clean, re.I):
+        return open_file(re.sub(r'^(?:the\s+)?file\s+', '', app_clean, flags=re.I))
+    if re.search(r'\.(?:com|org|net|io|edu|gov)\b', app_clean, re.I):
+        return open_website(app_clean)
+
     aliases = {
         "yt": "YouTube",
+        "youtube": "YouTube",
         "fb": "Facebook",
+        "facebook": "Facebook",
         "ig": "Instagram",
+        "instagram": "Instagram",
         "whatsapp": "WhatsApp",
         "discord": "Discord",
-        "vscode": "Visual Studio Code"
+        "vscode": "Visual Studio Code",
+        "visual studio code": "Visual Studio Code",
+        "code": "Visual Studio Code",
+        "terminal": "Terminal",
+        "finder": "Finder",
+        "chrome": "Google Chrome",
+        "google chrome": "Google Chrome",
+        "safari": "Safari",
+        "spotify": "Spotify",
+        "calculator": "Calculator",
+        "notes": "Notes",
+        "settings": "System Settings",
+        "system settings": "System Settings",
+        "textedit": "TextEdit",
     }
 
-    # Split by " and " or "," to handle multiple apps in one command
-    parts = [p.strip() for p in re.split(r'\band\b|,', app_name, flags=re.IGNORECASE) if p.strip()]
+    parts = [p.strip() for p in re.split(r'\band\b|,', app_clean, flags=re.IGNORECASE) if p.strip()]
     results = []
 
     for part in parts:
         target = aliases.get(part.lower(), part)
 
-        # Check if the user is actually trying to run a routine 
-        # (e.g. "open coding mode", "start study mode")
         if target.lower().endswith(" mode") or target.lower().endswith(" routine") or target.lower() == "good morning":
             from services.routines import run_routine
-            # Try to run the routine instead of opening an app
             res = run_routine(target)
             results.append(target)
             continue
 
-        # Handle website redirections for apps that are just sites
         if target.lower() in ("youtube", "youtube.com"):
             open_website("youtube.com")
             results.append("YouTube")
@@ -123,22 +286,39 @@ def open_app(app_name: str) -> str:
             results.append("Instagram")
             continue
 
-        # Try `open -a` first for speed and reliability, avoiding Spotlight UI
+        script = f'''
+        tell application "{target}"
+            reopen
+            activate
+        end tell
+        tell application "System Events"
+            try
+                set proc to first process whose (name is "{target}" or title is "{target}")
+                set visible of proc to true
+                set frontmost of proc to true
+                tell proc
+                    repeat with w in windows
+                        try
+                            set value of attribute "AXMinimized" of w to false
+                        end try
+                    end repeat
+                end tell
+            end try
+        end tell
+        '''
+        _run_applescript(script)
+
         ret = os.system(f'open -a "{target}" 2>/dev/null')
         if ret == 0:
             results.append(target)
         else:
-            # Fallback to Spotlight search
-            script = f'''
-            tell application "System Events"
-                key code 49 using command down
-                delay 0.5
-                keystroke "{target}"
-                delay 1.0
-                key code 36
-            end tell
-            '''
-            _run_applescript(script)
+            app_path = _run_shell(f'mdfind "kMDItemKind == \'Application\' && kMDItemDisplayName == \'{target}*\'" | head -1')
+            if app_path and os.path.exists(app_path):
+                ret2 = os.system(f'open "{app_path}"')
+                if ret2 == 0:
+                    results.append(target)
+                    continue
+
             results.append(target)
 
     return f"Opened {', '.join(results)} now, sir."
@@ -150,12 +330,35 @@ def open_app(app_name: str) -> str:
 
 def open_website(url: str) -> str:
     """Open a website in the default browser."""
-    if not url.startswith("http"):
-        url = "https://" + url
-    script = f'open location "{url}"'
+    import urllib.parse
+    clean_url = url.strip()
+    common_sites = {
+        "youtube": "https://www.youtube.com",
+        "google": "https://www.google.com",
+        "facebook": "https://www.facebook.com",
+        "instagram": "https://www.instagram.com",
+        "github": "https://www.github.com",
+        "twitter": "https://www.twitter.com",
+        "x": "https://www.x.com",
+        "reddit": "https://www.reddit.com",
+        "netflix": "https://www.netflix.com",
+        "amazon": "https://www.amazon.com",
+    }
+
+    if clean_url.lower() in common_sites:
+        final_url = common_sites[clean_url.lower()]
+    elif not clean_url.startswith("http://") and not clean_url.startswith("https://"):
+        if "." not in clean_url:
+            final_url = f"https://www.google.com/search?q={urllib.parse.quote(clean_url)}"
+        else:
+            final_url = "https://" + clean_url
+    else:
+        final_url = clean_url
+
+    script = f'open location "{final_url}"'
     result = _run_applescript(script)
     if "Error" not in result:
-        return f"Opening {url} in your browser, sir."
+        return f"Opening {final_url} in your browser, sir."
     return f"Failed to open website: {result}"
 
 
@@ -163,50 +366,45 @@ def open_website(url: str) -> str:
 # WHATSAPP MESSAGING
 # ─────────────────────────────────────────────
 
-def send_whatsapp(contact: str, message: str) -> str:
+def send_whatsapp(contact: str, message: str = "") -> str:
     """Open WhatsApp, search for a contact using Cmd+F, and send a message."""
-    # Use clipboard approach since WhatsApp text fields reject keystroke
+    if not message:
+        message = "Hello!"
     safe_contact = contact.replace('\\', '\\\\').replace('"', '\\"')
     safe_message = message.replace('\\', '\\\\').replace('"', '\\"')
-    
+
     script = f'''
-    -- Step 1: Open WhatsApp
     tell application "WhatsApp" to activate
     delay 2.5
-    
+
     tell application "System Events"
         tell process "WhatsApp"
             set frontmost to true
         end tell
         delay 0.5
-        
-        -- Step 2: Cmd+F to search chats (more reliable than Cmd+N)
+
         keystroke "f" using command down
         delay 1.5
     end tell
-    
-    -- Step 3: Paste the contact name via clipboard
+
     set the clipboard to "{safe_contact}"
     delay 0.3
     tell application "System Events"
         keystroke "v" using command down
         delay 2.5
-        
-        -- Step 4: Select first result
+
         key code 125  -- Down arrow
         delay 0.5
         key code 36   -- Enter to open chat
         delay 2.0
     end tell
-    
-    -- Step 5: Paste the message via clipboard
+
     set the clipboard to "{safe_message}"
     delay 0.3
     tell application "System Events"
         keystroke "v" using command down
         delay 0.8
-        
-        -- Step 6: Send
+
         key code 36   -- Enter to send
         delay 0.5
     end tell
@@ -223,46 +421,52 @@ def send_whatsapp(contact: str, message: str) -> str:
 
 def open_file(file_path: str) -> str:
     """Open a file with its default application."""
-    expanded = os.path.expanduser(file_path)
-    if not os.path.exists(expanded):
-        return f"File not found: {file_path}"
-    result = _run_shell(f'open "{expanded}"')
+    target_path = _resolve_file_path(file_path)
+    if not os.path.exists(target_path):
+        parent = os.path.dirname(target_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(target_path, "w") as f:
+            f.write("")
+    result = _run_shell(f'open "{target_path}"')
     if not result or "Error" not in result:
-        return f"Opening {os.path.basename(file_path)}, sir."
+        return f"Opening {os.path.basename(target_path)}, sir."
     return f"Could not open file: {result}"
 
 
 def open_folder(folder_path: str) -> str:
     """Open a folder in Finder."""
-    expanded = os.path.expanduser(folder_path)
-    if not os.path.exists(expanded):
-        return f"Folder not found: {folder_path}"
-    result = _run_shell(f'open "{expanded}"')
+    target_path = _resolve_folder_path(folder_path)
+    if not os.path.exists(target_path):
+        os.makedirs(target_path, exist_ok=True)
+    result = _run_shell(f'open "{target_path}"')
     if not result or "Error" not in result:
-        return f"Opening folder {os.path.basename(folder_path)} in Finder, sir."
+        return f"Opening folder {os.path.basename(target_path)} in Finder, sir."
     return f"Could not open folder: {result}"
 
 
 def create_file(file_path: str, content: str = "") -> str:
-    """Create a new file with optional content."""
-    expanded = os.path.expanduser(file_path)
-    parent = os.path.dirname(expanded)
-    if parent and not os.path.exists(parent):
+    """Create a new file with optional content and open it."""
+    target_path = _resolve_file_path(file_path)
+    parent = os.path.dirname(target_path)
+    if parent:
         os.makedirs(parent, exist_ok=True)
     try:
-        with open(expanded, "w") as f:
+        with open(target_path, "w") as f:
             f.write(content)
-        return f"File created at {file_path}, sir."
+        _run_shell(f'open "{target_path}"')
+        return f"File '{os.path.basename(target_path)}' created and opened, sir."
     except Exception as e:
         return f"Could not create file: {str(e)}"
 
 
 def create_folder(folder_path: str) -> str:
-    """Create a new folder."""
-    expanded = os.path.expanduser(folder_path)
+    """Create a new folder and open it in Finder."""
+    target_path = _resolve_folder_path(folder_path)
     try:
-        os.makedirs(expanded, exist_ok=True)
-        return f"Folder created at {folder_path}, sir."
+        os.makedirs(target_path, exist_ok=True)
+        _run_shell(f'open "{target_path}"')
+        return f"Folder '{os.path.basename(target_path)}' created and opened in Finder, sir."
     except Exception as e:
         return f"Could not create folder: {str(e)}"
 
@@ -440,12 +644,26 @@ def play_music(query: str, platform: str = "youtube") -> str:
 
 def search_files(query: str, directory: str = "~") -> str:
     """Search for files matching a query."""
-    expanded = os.path.expanduser(directory)
-    result = _run_shell(f'find "{expanded}" -maxdepth 4 -iname "*{query}*" 2>/dev/null | head -10')
+    clean_dir = directory.strip()
+    if clean_dir.lower() in ("documents", "document"):
+        clean_dir = "~/Documents"
+    elif clean_dir.lower() in ("desktop",):
+        clean_dir = "~/Desktop"
+    elif clean_dir.lower() in ("downloads", "download"):
+        clean_dir = "~/Downloads"
+    elif not clean_dir.startswith("~") and not clean_dir.startswith("/"):
+        clean_dir = f"~/{clean_dir}"
+
+    expanded = os.path.expanduser(clean_dir)
+    # Try mdfind first
+    result = _run_shell(f'mdfind -onlyin "{expanded}" "{query}" 2>/dev/null | head -10')
+    if not result:
+        result = _run_shell(f'find "{expanded}" -maxdepth 4 -iname "*{query}*" 2>/dev/null | head -10')
+
     if result:
-        files = result.split("\n")
-        return f"Found {len(files)} matching files:\n" + "\n".join(files)
-    return f"No files found matching '{query}'."
+        files = [f.strip() for f in result.split("\n") if f.strip()]
+        return f"Found {len(files)} matching file(s):\n" + "\n".join(files)
+    return f"No files found matching '{query}' in {directory}."
 
 
 # ─────────────────────────────────────────────
@@ -454,8 +672,11 @@ def search_files(query: str, directory: str = "~") -> str:
 
 def set_volume(level: int) -> str:
     """Set system volume (0-100)."""
+    try:
+        level = int(float(level))
+    except (ValueError, TypeError):
+        level = 50
     level = max(0, min(100, level))
-    mac_vol = int(level * 7 / 100)  # macOS volume is 0-7
     script = f'set volume output volume {level}'
     _run_applescript(script)
     return f"Volume set to {level}%, sir."
@@ -483,29 +704,25 @@ def set_brightness(level) -> str:
         import ctypes
         import ctypes.util
 
-        level = int(float(level))
+        level = int(float(str(level).replace('%', '')))
         level = max(0, min(100, level))
         fraction = level / 100.0
 
-        # Use macOS DisplayServices private framework (works on Apple Silicon & Intel)
         CoreGraphics = ctypes.CDLL(ctypes.util.find_library('CoreGraphics'))
         DisplayServices = ctypes.CDLL(
             '/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices'
         )
 
-        # Get main display ID
         CGMainDisplayID = CoreGraphics.CGMainDisplayID
         CGMainDisplayID.restype = ctypes.c_uint32
         display_id = CGMainDisplayID()
 
-        # Set brightness via DisplayServices
         DisplayServicesSetBrightness = DisplayServices.DisplayServicesSetBrightness
         DisplayServicesSetBrightness.argtypes = [ctypes.c_uint32, ctypes.c_float]
         DisplayServicesSetBrightness.restype = ctypes.c_int
 
         err = DisplayServicesSetBrightness(display_id, ctypes.c_float(fraction))
         if err != 0:
-            # Fallback: try the 'brightness' CLI tool (brew install brightness)
             result = _run_shell(f'brightness {fraction:.2f} 2>/dev/null')
             if 'not found' in result.lower() or 'error' in result.lower():
                 return f"Brightness control failed (error code {err}). Try: brew install brightness"
@@ -516,13 +733,17 @@ def set_brightness(level) -> str:
 
 
 # ─────────────────────────────────────────────
-# WEB SEARCH (SerpAPI)
+# WEB SEARCH (SerpAPI & Browser)
 # ─────────────────────────────────────────────
 
 def web_search(query: str) -> str:
-    """Search the web using SerpAPI and return top results."""
+    """Search the web using Google and open browser results."""
+    import urllib.parse
+    search_url = f"https://www.google.com/search?q={urllib.parse.quote(query)}"
+    _run_shell(f'open "{search_url}"')
+
     if not SERPAPI_KEY:
-        return "SerpAPI key not configured. Cannot perform web search."
+        return f"Opened Google search results for '{query}' in your browser, sir."
     try:
         params = {
             "q": query,
@@ -530,34 +751,28 @@ def web_search(query: str) -> str:
             "engine": "google",
             "num": 5
         }
-        resp = req.get("https://serpapi.com/search", params=params, timeout=15)
+        resp = req.get("https://serpapi.com/search", params=params, timeout=10)
         if resp.status_code != 200:
-            return f"Search failed with status {resp.status_code}"
+            return f"Opened Google search for '{query}', sir."
         data = resp.json()
 
-        # Build a clean summary from organic results
         results = []
-        for item in data.get("organic_results", [])[:5]:
+        for item in data.get("organic_results", [])[:3]:
             title = item.get("title", "")
             snippet = item.get("snippet", "")
-            link = item.get("link", "")
-            results.append(f"• {title}\n  {snippet}\n  {link}")
+            results.append(f"• {title}: {snippet}")
 
-        # Also grab the answer box if present
         answer_box = data.get("answer_box", {})
         direct_answer = answer_box.get("answer") or answer_box.get("snippet") or ""
 
-        output = ""
+        output = f"Opened search for '{query}' in browser, sir.\n"
         if direct_answer:
-            output += f"Direct answer: {direct_answer}\n\n"
+            output += f"Answer: {direct_answer}\n"
         if results:
-            output += "Top results:\n" + "\n\n".join(results)
-        else:
-            output += "No results found."
-
+            output += "\n".join(results)
         return output
-    except Exception as e:
-        return f"Web search error: {str(e)}"
+    except Exception:
+        return f"Opened Google search for '{query}' in your browser, sir."
 
 
 # ─────────────────────────────────────────────
@@ -593,6 +808,7 @@ TOOL_MAP = {
     "delete_memory": delete_memory,
     # Vision
     "analyze_screen": analyze_screen,
+    "read_screen_text": read_screen_text,
     # Routines
     "run_routine": run_routine,
     "list_routines": list_routines,
@@ -674,6 +890,8 @@ TOOL_MAP = {
     "mcp_list_tools": mcp_list_tools,
     "mcp_add_server": mcp_add_server,
     "mcp_remove_server": mcp_remove_server,
+    "mcp_enable_server": mcp_enable_server,
+    "mcp_disable_server": mcp_disable_server,
     # Vision Click (AI-powered screen interaction)
     "vision_click": vision_click,
     "vision_find": vision_find,
@@ -691,7 +909,30 @@ TOOL_MAP = {
     "list_ollama_models": list_ollama_models,
     "pull_ollama_model": pull_ollama_model,
     "set_ollama_model": set_ollama_model,
+    # IoT Controller
+    "list_iot_devices": list_iot_devices,
+    "control_iot_device": control_iot_device,
+    "add_iot_device": add_iot_device,
+    # Virtual Mouse
+    "move_virtual_mouse": move_virtual_mouse,
+    "virtual_mouse_dpad": virtual_mouse_dpad,
+    "virtual_mouse_click": virtual_mouse_click,
+    "virtual_mouse_scroll": virtual_mouse_scroll,
+    # Safety layer — lets the user talk to the permission/undo system directly
+    "undo_last_action": undo_last_action,
+    "list_recent_actions": list_recent_actions,
+    "list_undoable": list_undoable,
+    "always_allow": always_allow,
 }
+
+
+def _show_hud_card_fallback(title="MARK HUD", content="", icon="🔮", duration=8):
+    """Placeholder so the tool exists even when no UI is connected.
+    app.py replaces this at startup with the real socket-emitting version."""
+    return f"HUD unavailable (no UI connected) — {title}: {content}"
+
+
+TOOL_MAP.setdefault("show_hud_card", _show_hud_card_fallback)
 
 # Free models often send wrong param names. Map common variants to correct ones.
 ARGUMENT_ALIASES = {
@@ -809,6 +1050,14 @@ ARGUMENT_ALIASES = {
     "list_ollama_models": {},
     "pull_ollama_model": {"model": "model_name", "name": "model_name"},
     "set_ollama_model": {"model": "model", "name": "model"},
+    # IoT Controller & Virtual Mouse
+    "list_iot_devices": {"loc": "location", "room": "location", "place": "location"},
+    "control_iot_device": {"device": "device_query", "name": "device_query", "target": "device_query", "dev": "device_query", "do": "action", "cmd": "action", "state": "action", "val": "value", "level": "value", "setting": "value"},
+    "add_iot_device": {"dev_name": "name", "type": "dev_type", "loc": "location"},
+    "move_virtual_mouse": {"x_pos": "x", "y_pos": "y", "rel": "relative", "target_mode": "mode"},
+    "virtual_mouse_dpad": {"dir": "direction", "way": "direction", "pixels": "step", "distance": "step"},
+    "virtual_mouse_click": {"btn": "button", "type": "button"},
+    "virtual_mouse_scroll": {"dir": "direction", "steps": "amount"},
 }
 
 

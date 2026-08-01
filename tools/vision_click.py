@@ -1,285 +1,141 @@
 """
-MARK — Vision Click (AI-Powered Screen Interaction)
-Take a screenshot, use OCR to locate UI elements, then click them.
-Note: With a text-only local model, this uses OCR (pytesseract) for element detection
-instead of multimodal AI vision.
+MARK — Vision Click (screen interaction)
+
+Finds a UI element and acts on it. Element location comes from
+core.screen_sense, which prefers the accessibility tree (exact frames reported
+by the app itself) and falls back to Apple's native OCR.
+
+The model never produces coordinates. It picks from a numbered list of elements
+we located ourselves, so a wrong answer means clicking the wrong button rather
+than clicking an arbitrary point on screen.
 """
 
-import os
-import re
-import json
 import time
-import base64
-import subprocess
 import pyautogui
-from dotenv import load_dotenv
 
-load_dotenv()
+from core import screen_sense
 
 pyautogui.FAILSAFE = True
 
 
-# ─────────────────────────────────────────────
-# SCREENSHOT CAPTURE
-# ─────────────────────────────────────────────
+def _locate(instruction):
+    """Resolve an instruction to an element. Returns (element, error_message)."""
+    if not instruction or not instruction.strip():
+        return None, "Tell me what to look for, sir — for example 'the Send button'."
 
-def _capture_screen():
-    """Capture full screen, return (filepath, width, height) or (None, 0, 0)."""
-    path = "/tmp/mark_vision_click.png"
-    try:
-        subprocess.run(["screencapture", "-x", "-C", path], timeout=5, check=True)
-        if not os.path.exists(path):
-            return None, 0, 0
+    elements = screen_sense.element_map()
+    if not elements:
+        if not screen_sense.capture_available():
+            return None, screen_sense.PERMISSION_HINT
+        if not screen_sense.ax_available():
+            return None, screen_sense.AX_PERMISSION_HINT
+        return None, "I can't make out any interface elements on screen right now, sir."
 
-        result = subprocess.run(
-            ["sips", "-g", "pixelWidth", "-g", "pixelHeight", path],
-            capture_output=True, text=True, timeout=5,
-        )
-        w, h = 0, 0
-        for line in result.stdout.split("\n"):
-            if "pixelWidth" in line:
-                w = int(line.split(":")[-1].strip())
-            elif "pixelHeight" in line:
-                h = int(line.split(":")[-1].strip())
+    element = screen_sense.find_element(instruction, elements)
+    if not element:
+        visible = ", ".join(e["label"] for e in elements[:8])
+        return None, (f"I couldn't find '{instruction}' on screen, sir. "
+                      f"What I can see: {visible}")
+    return element, None
 
-        return path, w, h
-    except Exception as e:
-        print(f"  ✗ Screenshot error: {e}")
-        return None, 0, 0
-
-
-def _get_display_scale():
-    """Get Retina display scale factor."""
-    try:
-        result = subprocess.run(
-            ["python3", "-c",
-             "import Quartz; d = Quartz.CGDisplayBounds(Quartz.CGMainDisplayID()); "
-             "print(Quartz.CGDisplayPixelsWide(Quartz.CGMainDisplayID()) / d.size.width)"],
-            capture_output=True, text=True, timeout=5,
-        )
-        return float(result.stdout.strip())
-    except Exception:
-        return 2.0
-
-
-# ─────────────────────────────────────────────
-# OCR-BASED ELEMENT FINDING
-# ─────────────────────────────────────────────
-
-def _find_with_ocr(image_path, instruction, img_w, img_h):
-    """Use OCR (pytesseract) to find text on screen and return coordinates."""
-    try:
-        import pytesseract
-        from PIL import Image
-
-        img = Image.open(image_path)
-        # Get bounding box data
-        data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
-
-        instruction_lower = instruction.lower()
-        # Search for matching text
-        best_match = None
-        best_score = 0
-
-        for i, text in enumerate(data["text"]):
-            if not text.strip():
-                continue
-            text_lower = text.strip().lower()
-
-            # Check if any word in instruction matches OCR text
-            for word in instruction_lower.split():
-                if len(word) >= 3 and word in text_lower:
-                    score = len(word) / len(text_lower) if text_lower else 0
-                    conf = int(data["conf"][i]) if data["conf"][i] != "-1" else 0
-                    weighted = score * (conf / 100.0) if conf > 0 else score * 0.5
-
-                    if weighted > best_score:
-                        x = data["left"][i] + data["width"][i] // 2
-                        y = data["top"][i] + data["height"][i] // 2
-                        best_score = weighted
-                        best_match = {"x": x, "y": y, "element": text.strip()}
-
-        return best_match
-
-    except ImportError:
-        print("  ✗ pytesseract not installed. Install: brew install tesseract && pip install pytesseract")
-        return None
-    except Exception as e:
-        print(f"  ✗ OCR error: {e}")
-        return None
-
-
-# ─────────────────────────────────────────────
-# MAIN TOOLS
-# ─────────────────────────────────────────────
 
 def vision_click(instruction=""):
-    """
-    Find a UI element on screen using OCR and click it.
-    """
-    if not instruction:
-        return "Please describe what to click, e.g., 'the Send button' or 'the search bar'."
+    """Find a UI element and click it."""
+    print(f"  👁️  Looking for '{instruction}'...")
+    element, error = _locate(instruction)
+    if error:
+        return error
 
-    print(f"  👁️ Vision Click: Looking for '{instruction}'...")
-
-    path, img_w, img_h = _capture_screen()
-    if not path:
-        return "Could not capture screen. Check screen recording permissions."
-
-    result = _find_with_ocr(path, instruction, img_w, img_h)
-
-    try:
-        os.remove(path)
-    except OSError:
-        pass
-
-    if not result:
-        return f"Could not find '{instruction}' on screen. Make sure the element is visible. (Note: OCR-based detection works best with visible text labels.)"
-
-    scale = _get_display_scale()
-    screen_x = int(result["x"] / scale)
-    screen_y = int(result["y"] / scale)
-
-    pyautogui.click(screen_x, screen_y)
-    return f"Clicked '{result['element']}' at ({screen_x}, {screen_y}), sir."
+    pyautogui.click(element["x"], element["y"])
+    return f"Clicked '{element['label']}', sir."
 
 
 def vision_find(instruction=""):
-    """
-    Find a UI element on screen and return its coordinates WITHOUT clicking.
-    """
-    if not instruction:
-        return "Please describe what to find on screen."
-
-    print(f"  👁️ Vision Find: Looking for '{instruction}'...")
-
-    path, img_w, img_h = _capture_screen()
-    if not path:
-        return "Could not capture screen."
-
-    result = _find_with_ocr(path, instruction, img_w, img_h)
-
-    try:
-        os.remove(path)
-    except OSError:
-        pass
-
-    if not result:
-        return f"Could not find '{instruction}' on screen."
-
-    scale = _get_display_scale()
-    screen_x = int(result["x"] / scale)
-    screen_y = int(result["y"] / scale)
-
-    return f"Found '{result['element']}' at screen coordinates ({screen_x}, {screen_y})."
+    """Locate a UI element without clicking it."""
+    element, error = _locate(instruction)
+    if error:
+        return error
+    return (f"'{element['label']}' is at ({element['x']}, {element['y']}) — "
+            f"a {element.get('role', 'text element')}.")
 
 
 def vision_describe():
-    """
-    Take a screenshot and list visible text elements on screen using OCR.
-    """
-    print("  👁️ Vision Describe: Analyzing screen layout...")
+    """List every interactive element currently on screen."""
+    elements = screen_sense.element_map()
+    if not elements:
+        if not screen_sense.capture_available():
+            return screen_sense.PERMISSION_HINT
+        return "I can't make out any interface elements on screen right now, sir."
 
-    path, img_w, img_h = _capture_screen()
-    if not path:
-        return "Could not capture screen."
-
-    try:
-        import pytesseract
-        from PIL import Image
-
-        img = Image.open(path)
-        text = pytesseract.image_to_string(img)
-
-        try:
-            os.remove(path)
-        except OSError:
-            pass
-
-        if text and text.strip():
-            return f"Visible text on screen:\n\n{text[:2000]}"
-        return "Could not detect readable text on screen."
-
-    except ImportError:
-        try:
-            os.remove(path)
-        except OSError:
-            pass
-        return "Vision describe requires pytesseract. Install: brew install tesseract && pip install pytesseract"
-    except Exception as e:
-        try:
-            os.remove(path)
-        except OSError:
-            pass
-        return f"Vision analysis error: {e}"
+    lines = ["Elements on screen:"]
+    for element in elements[:45]:
+        role = element.get("role", "text")
+        lines.append(f"  [{element['index']}] {role}: {element['label']} "
+                     f"({element['x']}, {element['y']})")
+    if len(elements) > 45:
+        lines.append(f"  ... and {len(elements) - 45} more")
+    return "\n".join(lines)
 
 
 def vision_type(instruction="", text=""):
-    """
-    Find a text field on screen using OCR, click it, then type text.
-    """
-    if not instruction:
-        return "Describe which text field to target."
+    """Click a text field, then type into it."""
     if not text:
-        return "Specify what text to type."
+        return "What should I type, sir?"
 
-    click_result = vision_click(instruction)
-    if "Could not find" in click_result:
-        return click_result
+    element, error = _locate(instruction)
+    if error:
+        return error
 
-    time.sleep(0.3)
+    pyautogui.click(element["x"], element["y"])
+    time.sleep(0.25)
 
+    # Paste rather than keystroke — faster, and safe with non-ASCII text.
     try:
         import pyperclip
+        previous = ""
+        try:
+            previous = pyperclip.paste()
+        except Exception:
+            pass
         pyperclip.copy(text)
+        time.sleep(0.05)
         pyautogui.hotkey("command", "v")
+        time.sleep(0.15)
+        if previous:
+            try:
+                pyperclip.copy(previous)
+            except Exception:
+                pass
     except ImportError:
         pyautogui.write(text, interval=0.02)
 
-    return f"Clicked '{instruction}' and typed: {text[:50]}{'...' if len(text) > 50 else ''}"
+    preview = text[:50] + ("..." if len(text) > 50 else "")
+    return f"Typed into '{element['label']}': {preview}"
 
 
 def vision_interact(action="", target=""):
-    """
-    Perform various interactions with screen elements found by OCR.
-    """
-    if not target:
-        return "Describe what to interact with on screen."
-
+    """Click, double-click, right-click, hover over, or locate an element."""
     action = (action or "click").lower().strip()
 
     if action == "find":
         return vision_find(target)
 
-    print(f"  👁️ Vision {action}: '{target}'...")
+    element, error = _locate(target)
+    if error:
+        return error
 
-    path, img_w, img_h = _capture_screen()
-    if not path:
-        return "Could not capture screen."
-
-    result = _find_with_ocr(path, target, img_w, img_h)
-
-    try:
-        os.remove(path)
-    except OSError:
-        pass
-
-    if not result:
-        return f"Could not find '{target}' on screen."
-
-    scale = _get_display_scale()
-    x = int(result["x"] / scale)
-    y = int(result["y"] / scale)
+    x, y = element["x"], element["y"]
+    label = element["label"]
 
     if action == "double_click":
         pyautogui.doubleClick(x, y)
-        return f"Double-clicked '{result['element']}' at ({x}, {y})."
-    elif action == "right_click":
+        return f"Double-clicked '{label}', sir."
+    if action == "right_click":
         pyautogui.rightClick(x, y)
-        return f"Right-clicked '{result['element']}' at ({x}, {y})."
-    elif action == "hover":
+        return f"Right-clicked '{label}', sir."
+    if action == "hover":
         pyautogui.moveTo(x, y, duration=0.2)
-        return f"Hovering over '{result['element']}' at ({x}, {y})."
-    else:
-        pyautogui.click(x, y)
-        return f"Clicked '{result['element']}' at ({x}, {y})."
+        return f"Hovering over '{label}', sir."
+
+    pyautogui.click(x, y)
+    return f"Clicked '{label}', sir."

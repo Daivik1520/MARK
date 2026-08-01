@@ -1,0 +1,71 @@
+{
+  "living_room_light": {
+    "id": "living_room_light",
+    "name": "Living Room Light",
+    "type": "light",
+    "state": "off",
+    "brightness": 67,
+    "color": "#ffaa00",
+    "location": "Living Room",
+    "pos": {
+      "x": 180,
+      "y": 120
+    },
+    "webhook_url": ""
+  },
+  "bedroom_light": {
+    "id": "bedroom_light",
+    "name": "Bedroom Light",
+    "type": "light",
+    "state": "off",
+    "brightness": 60,
+    "color": "#4a90e2",
+    "location": "Bedroom",
+    "pos": {
+      "x": 480,
+      "y": 120
+    },
+    "webhook_url": ""
+  },
+  "smart_plug": {
+    "id": "smart_plug",
+    "name": "Desk Power Plug",
+    "type": "plug",
+    "state": "off",
+    "power_w": 45,
+    "location": "Office",
+    "pos": {
+      "x": 180,
+      "y": 320
+    },
+    "webhook_url": ""
+  },
+  "thermostat": {
+    "id": "thermostat",
+    "name": "Main AC Thermostat",
+    "type": "thermostat",
+    "state": "on",
+    "target_temp": 70,
+    "current_temp": 71,
+    "mode": "cool",
+    "location": "Hallway",
+    "pos": {
+      "x": 480,
+      "y": 320
+    },
+    "webhook_url": ""
+  },
+  "smart_tv": {
+    "id": "smart_tv",
+    "name": "Living Room TV",
+    "type": "tv",
+    "state": "on",
+    "volume": 25,
+    "location": "Living Room",
+    "pos": {
+      "x": 330,
+      "y": 220
+    },
+    "webhook_url": ""
+  }
+}
